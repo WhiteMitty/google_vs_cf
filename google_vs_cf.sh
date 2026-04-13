@@ -8,8 +8,18 @@ AUTHOR="Doudou Zhang"
 
 TEST_DNS=("1.1.1.1" "8.8.8.8")
 TEST_LABELS=("Cloudflare" "Google")
-DOMAINS=("google.com" "youtube.com" "instagram.com" "telegram.org" "x.com" "netflix.com")
-ITERATIONS=8
+DOMAINS=(
+    "google.com"
+    "youtube.com"
+    "instagram.com"
+    "telegram.org"
+    "x.com"
+    "netflix.com"
+    "wikipedia.org"
+    "bbc.com"
+    "reuters.com"
+)
+ITERATIONS=12
 DIG_TIMEOUT=2
 OUTER_TIMEOUT=$((DIG_TIMEOUT + 1))
 QTYPE="A"
@@ -34,8 +44,8 @@ else
     C_TITLE=""; C_OK=""; C_WARN=""; C_ERR=""; C_DIM=""; C_RESET=""
 fi
 
-LINE="============================================================"
-SUBLINE="------------------------------------------------------------"
+LINE="================================================================"
+SUBLINE="----------------------------------------------------------------"
 
 say()  { echo "$*"; }
 ok()   { echo "${C_OK}$*${C_RESET}"; }
@@ -60,10 +70,11 @@ clear_screen() {
 
 print_header() {
     echo "$LINE"
-    echo "${C_TITLE}${APP_NAME}${C_RESET}  v ${VERSION}  |  ${AUTHOR}"
+    echo "${C_TITLE}${APP_NAME}${C_RESET}  v ${VERSION}  |  Designed by ${AUTHOR}"
+    echo "$LINE"
     echo "Mode     : $(resolv_mode)"
     echo "Resolved : $(resolved_summary)"
-    echo "$SUBLINE"
+    echo
 }
 
 pkg_installed() {
@@ -153,6 +164,22 @@ calc_stats() {
     }'
 }
 
+calc_score() {
+    local avg="$1"
+    local median="$2"
+    local bad="$3"
+    local total_rounds="$4"
+    awk -v avg="$avg" -v median="$median" -v bad="$bad" -v total="$total_rounds" 'BEGIN {
+        if (avg == "N/A" || median == "N/A") {
+            print "N/A"
+            exit
+        }
+        bad_ratio = (total > 0) ? bad / total : 1
+        score = (median * 0.70) + (avg * 0.25) + (bad_ratio * 25)
+        printf "%.2f", score
+    }'
+}
+
 fmt_header() {
     printf "%-18s | %-6s | %-6s | %-7s | %-7s | %-4s\n" "$1" "Min" "Max" "Avg" "Median" "Bad"
 }
@@ -161,16 +188,24 @@ fmt_row() {
     printf "%-18s | %-6s | %-6s | %-7s | %-7s | %-4s\n" "$1" "$2" "$3" "$4" "$5" "$6"
 }
 
+fmt_summary_header() {
+    printf "%-18s | %-7s | %-7s | %-4s | %-6s\n" "DNS" "Avg" "Median" "Bad" "Score"
+}
+
+fmt_summary_row() {
+    printf "%-18s | %-7s | %-7s | %-4s | %-6s\n" "$1" "$2" "$3" "$4" "$5"
+}
+
 choose_profile() {
     while true; do
-        echo "$SUBLINE"
         echo "DNS profiles"
         echo "$SUBLINE"
-        echo "1) CF Dual              1.1.1.1  ->  1.0.0.1"
-        echo "2) Google Dual          8.8.8.8  ->  8.8.4.4"
-        echo "3) CF First             1.1.1.1  ->  8.8.8.8"
-        echo "4) Google First         8.8.8.8  ->  1.1.1.1"
+        echo "1) CF Dual        1.1.1.1  ->  1.0.0.1"
+        echo "2) Google Dual    8.8.8.8  ->  8.8.4.4"
+        echo "3) CF First       1.1.1.1  ->  8.8.8.8"
+        echo "4) Google First   8.8.8.8  ->  1.1.1.1"
         echo "0) Back"
+        echo
         read -r -p "Choose [0-4]: " choice
         case "$choice" in
             1)
@@ -234,11 +269,11 @@ purge_resolved() {
 }
 
 apply_locked_file() {
-    echo "$SUBLINE"
     echo "Force apply + lock"
     echo "$SUBLINE"
     echo "Profile : $PROFILE_NAME"
     echo "DNS     : $DNS1 -> $DNS2"
+    echo
     read -r -p "Continue? [y/N]: " answer
     case "$answer" in
         y|Y) ;;
@@ -266,11 +301,11 @@ apply_locked_file() {
 }
 
 reinstall_resolved_apply() {
-    echo "$SUBLINE"
     echo "Reinstall resolved + apply"
     echo "$SUBLINE"
     echo "Profile : $PROFILE_NAME"
     echo "DNS     : $DNS1 -> $DNS2"
+    echo
     read -r -p "Continue? [y/N]: " answer
     case "$answer" in
         y|Y) ;;
@@ -308,11 +343,84 @@ CFG
     ok "resolved reinstalled and profile applied."
 }
 
-test_dns() {
-    local dns label domain output rc qtime status bad_count total_bad min max avg median
-    local -a times=() all_times=() summary_rows=()
+print_recommendation() {
+    local cf_score="$1"
+    local google_score="$2"
+    local cf_avg="$3"
+    local google_avg="$4"
+    local cf_median="$5"
+    local google_median="$6"
+    local cf_bad="$7"
+    local google_bad="$8"
 
+    echo
+    echo "Recommendation"
     echo "$SUBLINE"
+
+    if [[ "$cf_score" == "N/A" && "$google_score" == "N/A" ]]; then
+        warn "No valid result."
+        return 0
+    fi
+
+    if [[ "$cf_score" == "N/A" ]]; then
+        ok "Use Google. Cloudflare had no valid score."
+        return 0
+    fi
+
+    if [[ "$google_score" == "N/A" ]]; then
+        ok "Use Cloudflare. Google had no valid score."
+        return 0
+    fi
+
+    local winner loser winner_score loser_score winner_avg winner_median winner_bad
+    if awk -v a="$cf_score" -v b="$google_score" 'BEGIN { exit !(a <= b) }'; then
+        winner="Cloudflare"
+        loser="Google"
+        winner_score="$cf_score"
+        loser_score="$google_score"
+        winner_avg="$cf_avg"
+        winner_median="$cf_median"
+        winner_bad="$cf_bad"
+    else
+        winner="Google"
+        loser="Cloudflare"
+        winner_score="$google_score"
+        loser_score="$cf_score"
+        winner_avg="$google_avg"
+        winner_median="$google_median"
+        winner_bad="$google_bad"
+    fi
+
+    local diff level
+    diff=$(awk -v a="$winner_score" -v b="$loser_score" 'BEGIN { d=b-a; if (d < 0) d=-d; printf "%.2f", d }')
+
+    if awk -v d="$diff" 'BEGIN { exit !(d < 1.5) }'; then
+        level="Slight edge"
+    elif awk -v d="$diff" 'BEGIN { exit !(d < 4.0) }'; then
+        level="Recommended"
+    else
+        level="Strongly recommended"
+    fi
+
+    ok "$level: $winner"
+    echo "Why     : lower median first, lower average second, fewer bad results helps."
+    echo "Score   : $winner $winner_score  vs  $loser $loser_score"
+    echo "Winner  : median $winner_median ms, avg $winner_avg ms, bad $winner_bad"
+
+    if (( cf_bad > 0 || google_bad > 0 )); then
+        echo "Note    : bad results add a mild penalty."
+    fi
+}
+
+test_dns() {
+    local dns label domain output rc qtime status bad_count total_bad min max avg median score
+    local -a times=() all_times=() summary_rows=()
+    local cf_score="N/A" google_score="N/A"
+    local cf_avg="N/A" google_avg="N/A"
+    local cf_median="N/A" google_median="N/A"
+    local cf_bad=0 google_bad=0
+    local total_rounds=$(( ${#DOMAINS[@]} * ITERATIONS ))
+
     echo "Test DNS"
     echo "$SUBLINE"
     echo "Targets : 1.1.1.1 vs 8.8.8.8"
@@ -363,7 +471,7 @@ test_dns() {
                 esac
 
                 printf "." >&2
-                sleep 0.05
+                sleep 0.03
             done
 
             total_bad=$((total_bad + bad_count))
@@ -379,28 +487,41 @@ test_dns() {
 
         if [[ ${#all_times[@]} -gt 0 ]]; then
             read -r min max avg median <<< "$(calc_stats "${all_times[@]}")"
-            summary_rows+=("${median/./}|$dns|$label|$min|$max|$avg|$median|$total_bad")
+            score=$(calc_score "$avg" "$median" "$total_bad" "$total_rounds")
+            summary_rows+=("$score|$dns|$label|$avg|$median|$total_bad")
             fmt_row "TOTAL" "$min" "$max" "$avg" "$median" "$total_bad"
+
+            if [[ "$label" == "Cloudflare" ]]; then
+                cf_score="$score"; cf_avg="$avg"; cf_median="$median"; cf_bad="$total_bad"
+            else
+                google_score="$score"; google_avg="$avg"; google_median="$median"; google_bad="$total_bad"
+            fi
         else
-            summary_rows+=("999999|$dns|$label|N/A|N/A|N/A|N/A|$total_bad")
+            summary_rows+=("999999|$dns|$label|N/A|N/A|$total_bad")
             fmt_row "TOTAL" "N/A" "N/A" "N/A" "N/A" "$total_bad"
+
+            if [[ "$label" == "Cloudflare" ]]; then
+                cf_bad="$total_bad"
+            else
+                google_bad="$total_bad"
+            fi
         fi
 
         echo
     done
 
-    echo "$SUBLINE"
     echo "Summary"
     echo "$SUBLINE"
-    fmt_header "DNS"
+    fmt_summary_header
     echo "$SUBLINE"
-    printf "%s\n" "${summary_rows[@]}" | sort -t'|' -k1,1n | while IFS='|' read -r _k dns label min max avg median bad; do
-        fmt_row "$dns" "$min" "$max" "$avg" "$median" "$bad"
+    printf "%s\n" "${summary_rows[@]}" | sort -t'|' -k1,1g | while IFS='|' read -r score dns label avg median bad; do
+        fmt_summary_row "$dns" "$avg" "$median" "$bad" "$score"
     done
+
+    print_recommendation "$cf_score" "$google_score" "$cf_avg" "$google_avg" "$cf_median" "$google_median" "$cf_bad" "$google_bad"
 }
 
 show_status() {
-    echo "$SUBLINE"
     echo "Status"
     echo "$SUBLINE"
     echo "resolv.conf"
@@ -491,7 +612,8 @@ main_menu() {
                 pause
                 ;;
             0)
-                break
+                clear_screen
+                return 0
                 ;;
             *)
                 warn "Invalid choice."
