@@ -17,7 +17,7 @@ DOMAINS=(
     "netflix.com"
     "wikipedia.org"
     "bbc.com"
-    "reuters.com"
+    "github.com"
 )
 ITERATIONS=12
 DIG_TIMEOUT=2
