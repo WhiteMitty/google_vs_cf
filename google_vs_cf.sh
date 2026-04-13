@@ -9,25 +9,11 @@ AUTHOR="Doudou Zhang"
 TEST_DNS=("1.1.1.1" "8.8.8.8")
 TEST_LABELS=("Cloudflare" "Google")
 DOMAINS=(
-    "x.com"
-    "bbc.com"
-    "twitch.tv"
-    "intel.com"
-    "apple.com"
-    "amazon.com"
-    "fastly.com"
-    "akamai.com"
-    "google.com"
-    "github.com"
-    "youtube.com"
-    "netflix.com"
-    "telegram.org"
-    "bilibili.com"
-    "wikipedia.org"
-    "microsoft.com"
-    "instagram.com"  
-    "aws.amazon.com"
-    "steampowered.com"   
+    "x.com"          "bbc.com"        "twitch.tv"        "intel.com"
+    "apple.com"      "amazon.com"     "fastly.com"       "akamai.com"
+    "google.com"     "github.com"     "youtube.com"      "netflix.com"
+    "telegram.org"   "bilibili.com"   "wikipedia.org"    "microsoft.com"
+    "instagram.com"  "aws.amazon.com" "steampowered.com"   
 )
 ITERATIONS=12
 DIG_TIMEOUT=2
