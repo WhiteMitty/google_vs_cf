@@ -527,7 +527,7 @@ print_main_menu() {
     echo "03) Reinstall resolved + apply"
     echo "04) Unlock only"
     echo "05) Show status"
-    echo "0)  Exit"
+    echo "00)  Exit"
     echo
     echo "Mode: $(mode_summary)"
 }
