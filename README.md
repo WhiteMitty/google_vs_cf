@@ -41,6 +41,7 @@ It can:
 - `bash`
 - `apt-get`
 - **root privileges to run the script**
+- Please run this script as root.
 
 The script can prompt to install missing tools such as:
 
@@ -57,15 +58,13 @@ The script can prompt to install missing tools such as:
 ### curl
 
 ```bash
-curl -fsSL -o google_vs_cf.sh https://raw.githubusercontent.com/WhiteMitty/google_vs_cf/main/google_vs_cf.sh
-chmod +x google_vs_cf.sh
+curl -fsSL -o google_vs_cf.sh https://raw.githubusercontent.com/WhiteMitty/google_vs_cf/main/google_vs_cf.sh && chmod +x google_vs_cf.sh && bash google_vs_cf.sh
 ```
 
 ### wget
 
 ```bash
-wget -O google_vs_cf.sh https://raw.githubusercontent.com/WhiteMitty/google_vs_cf/main/google_vs_cf.sh
-chmod +x google_vs_cf.sh
+wget -O google_vs_cf.sh https://raw.githubusercontent.com/WhiteMitty/google_vs_cf/main/google_vs_cf.sh && chmod +x google_vs_cf.sh && bash google_vs_cf.sh
 ```
 
 ---
