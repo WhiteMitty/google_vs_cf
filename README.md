@@ -1,11 +1,12 @@
 # google_vs_cf
 
-Compare Cloudflare DNS and Google DNS, select the better one and lock it.
+Compare Cloudflare DNS and Google DNS.
 
 ## Features
 - Test `1.1.1.1` vs `8.8.8.8`
-- More test rounds for steadier results
+- 12 rounds for steadier results
 - Mild recommendation after each test
+- Ignore `0 ms` samples in stats and recommendation
 - Force-write DNS and lock `/etc/resolv.conf`
 - Purge `systemd-resolved`
 - Reinstall `systemd-resolved` and apply a DNS profile
@@ -19,9 +20,11 @@ Compare Cloudflare DNS and Google DNS, select the better one and lock it.
 - Google First: `8.8.8.8 -> 1.1.1.1`
 
 ## How scoring works
-The test gives the highest weight to median latency, then average latency.
-Bad results add a mild penalty.
-Lower score is better.
+- Median has the highest weight
+- Average has the second weight
+- Bad results add a mild penalty
+- `0 ms` is ignored
+- Lower score is better
 
 ## Start
 
@@ -49,4 +52,4 @@ wget -qO google_vs_cf.sh https://raw.githubusercontent.com/WhiteMitty/google_vs_
 - Force mode purges `systemd-resolved`.
 - Reinstall mode installs `systemd-resolved` again.
 - Force mode locks `/etc/resolv.conf` with `chattr +i`.
-- To edit it manually, unlock it first.
+- Unlock before editing `/etc/resolv.conf` manually.
