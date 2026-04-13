@@ -63,11 +63,67 @@ need_root() {
 
 pause() {
     echo
-    read -r -p "Press Enter to return..." _dummy
+    if ! read -r -p "Press Enter to return..." _dummy; then
+        echo
+    fi
 }
 
 clear_screen() {
     clear 2>/dev/null || true
+}
+
+pkg_installed() {
+    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
+}
+
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+service_state() {
+    local unit="$1"
+    if ! command_exists systemctl; then
+        echo "n/a"
+        return 0
+    fi
+    systemctl is-active "$unit" 2>/dev/null || true
+}
+
+enabled_state() {
+    local unit="$1"
+    if ! command_exists systemctl; then
+        echo "n/a"
+        return 0
+    fi
+    systemctl is-enabled "$unit" 2>/dev/null || true
+}
+
+resolved_summary_raw() {
+    if pkg_installed systemd-resolved; then
+        echo "installed|$(enabled_state systemd-resolved)|$(service_state systemd-resolved)"
+    else
+        echo "not installed|n/a|n/a"
+    fi
+}
+
+is_locked() {
+    [[ -e /etc/resolv.conf ]] || return 1
+    command_exists lsattr || return 1
+    lsattr /etc/resolv.conf 2>/dev/null | awk '{print $1}' | grep -q 'i'
+}
+
+resolv_mode_raw() {
+    if [[ -L /etc/resolv.conf ]]; then
+        echo "resolved link"
+    elif [[ -f /etc/resolv.conf ]]; then
+        if is_locked; then
+            echo "locked file"
+        else
+            echo "plain file"
+        fi
+    else
+        echo "missing"
+    fi
 }
 
 color_mode() {
@@ -87,7 +143,7 @@ color_resolved() {
     IFS='|' read -r package enabled active <<< "$raw"
 
     if [[ "$package" != "installed" ]]; then
-        printf "%spurged or not installed%s" "$C_ERR" "$C_RESET"
+        printf "%snot installed%s" "$C_ERR" "$C_RESET"
         return 0
     fi
 
@@ -111,55 +167,6 @@ print_header() {
     echo
 }
 
-pkg_installed() {
-    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
-}
-
-service_state() {
-    local unit="$1"
-    if ! command -v systemctl >/dev/null 2>&1; then
-        echo "n/a"
-        return 0
-    fi
-    systemctl is-active "$unit" 2>/dev/null || true
-}
-
-enabled_state() {
-    local unit="$1"
-    if ! command -v systemctl >/dev/null 2>&1; then
-        echo "n/a"
-        return 0
-    fi
-    systemctl is-enabled "$unit" 2>/dev/null || true
-}
-
-resolved_summary_raw() {
-    if pkg_installed systemd-resolved; then
-        echo "installed|$(enabled_state systemd-resolved)|$(service_state systemd-resolved)"
-    else
-        echo "purged|n/a|n/a"
-    fi
-}
-
-is_locked() {
-    [[ -e /etc/resolv.conf ]] || return 1
-    lsattr /etc/resolv.conf 2>/dev/null | awk '{print $1}' | grep -q 'i'
-}
-
-resolv_mode_raw() {
-    if [[ -L /etc/resolv.conf ]]; then
-        echo "resolved link"
-    elif [[ -f /etc/resolv.conf ]]; then
-        if is_locked; then
-            echo "locked file"
-        else
-            echo "plain file"
-        fi
-    else
-        echo "missing"
-    fi
-}
-
 pkg_install() {
     local -a pkgs=("$@")
     export DEBIAN_FRONTEND=noninteractive
@@ -167,20 +174,48 @@ pkg_install() {
     apt-get install -y "${pkgs[@]}"
 }
 
-ensure_tools() {
-    local -a missing=()
-    command -v dig >/dev/null 2>&1 || missing+=(dnsutils)
-    command -v timeout >/dev/null 2>&1 || missing+=(coreutils)
-    command -v awk >/dev/null 2>&1 || missing+=(gawk)
-    command -v sort >/dev/null 2>&1 || missing+=(coreutils)
-    command -v chattr >/dev/null 2>&1 || missing+=(e2fsprogs)
-    command -v lsattr >/dev/null 2>&1 || missing+=(e2fsprogs)
-    command -v dpkg-query >/dev/null 2>&1 || missing+=(dpkg)
+prompt_install_missing() {
+    local -a missing=("$@")
+    mapfile -t missing < <(printf '%s\n' "${missing[@]}" | awk 'NF && !seen[$0]++')
 
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        mapfile -t missing < <(printf '%s\n' "${missing[@]}" | awk '!seen[$0]++')
-        pkg_install "${missing[@]}"
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        return 0
     fi
+
+    echo
+    warn "Missing packages: ${missing[*]}"
+    if ! read -r -p "Install now? [y/N]: " answer; then
+        echo
+        return 1
+    fi
+    case "$answer" in
+        y|Y) pkg_install "${missing[@]}" ;;
+        *) return 1 ;;
+    esac
+}
+
+need_test_tools() {
+    local -a missing=()
+
+    if ! command_exists dig; then
+        if command_exists apt-cache && apt-cache show bind9-dnsutils >/dev/null 2>&1; then
+            missing+=(bind9-dnsutils)
+        else
+            missing+=(dnsutils)
+        fi
+    fi
+    command_exists timeout || missing+=(coreutils)
+    command_exists awk || missing+=(gawk)
+    command_exists sort || missing+=(coreutils)
+
+    prompt_install_missing "${missing[@]}"
+}
+
+need_lock_tools() {
+    local -a missing=()
+    command_exists chattr || missing+=(e2fsprogs)
+    command_exists lsattr || missing+=(e2fsprogs)
+    prompt_install_missing "${missing[@]}"
 }
 
 calc_stats() {
@@ -245,7 +280,10 @@ choose_profile() {
         echo
         echo "0) Back"
         echo
-        read -r -p "Choose [0-4]: " choice
+        if ! read -r -p "Choose [0-4]: " choice; then
+            echo
+            return 1
+        fi
         case "$choice" in
             1)
                 PROFILE_NAME="CF Dual"
@@ -283,7 +321,7 @@ choose_profile() {
 }
 
 unlock_resolv() {
-    if [[ -e /etc/resolv.conf ]]; then
+    if [[ -e /etc/resolv.conf ]] && command_exists chattr; then
         chattr -i /etc/resolv.conf 2>/dev/null || true
     fi
 }
@@ -295,19 +333,21 @@ cleanup_old_google_vs_cf() {
     systemctl daemon-reload 2>/dev/null || true
 }
 
-purge_resolved() {
+neutralize_resolved() {
     unlock_resolv
     cleanup_old_google_vs_cf
 
     systemctl stop systemd-resolved 2>/dev/null || true
     systemctl disable systemd-resolved 2>/dev/null || true
     systemctl mask systemd-resolved 2>/dev/null || true
-
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get purge -y systemd-resolved 2>/dev/null || apt-get remove --purge -y systemd-resolved 2>/dev/null || true
 }
 
 apply_locked_file() {
+    if ! need_lock_tools; then
+        warn "Canceled."
+        return 1
+    fi
+
     echo "Force apply + lock"
     echo "$SUBLINE"
     echo
@@ -315,13 +355,13 @@ apply_locked_file() {
     echo
     echo "DNS     : $DNS1 -> $DNS2"
     echo
-    read -r -p "Continue? [y/N]: " answer
+    read -r -p "Continue? [y/N]: " answer || { echo; warn "Canceled."; return 1; }
     case "$answer" in
         y|Y) ;;
         *) warn "Canceled."; return 1 ;;
     esac
 
-    purge_resolved
+    neutralize_resolved
 
     rm -f /etc/resolv.conf
     {
@@ -349,7 +389,7 @@ reinstall_resolved_apply() {
     echo
     echo "DNS     : $DNS1 -> $DNS2"
     echo
-    read -r -p "Continue? [y/N]: " answer
+    read -r -p "Continue? [y/N]: " answer || { echo; warn "Canceled."; return 1; }
     case "$answer" in
         y|Y) ;;
         *) warn "Canceled."; return 1 ;;
@@ -358,9 +398,11 @@ reinstall_resolved_apply() {
     unlock_resolv
     cleanup_old_google_vs_cf
 
+    systemctl unmask systemd-resolved 2>/dev/null || true
+
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install --reinstall -y systemd-resolved
+    apt-get install -y systemd-resolved
 
     mkdir -p "$RESOLVED_DROPIN_DIR"
     cat > "$RESOLVED_DROPIN_FILE" <<CFG
@@ -370,15 +412,20 @@ Domains=~.
 DNSSEC=no
 CFG
 
-    systemctl unmask systemd-resolved 2>/dev/null || true
     systemctl enable systemd-resolved >/dev/null 2>&1 || true
     systemctl restart systemd-resolved
 
-    rm -f /etc/resolv.conf
+    for _ in {1..15}; do
+        if [[ -e /run/systemd/resolve/stub-resolv.conf || -e /run/systemd/resolve/resolv.conf ]]; then
+            break
+        fi
+        sleep 0.2
+    done
+
     if [[ -e /run/systemd/resolve/stub-resolv.conf ]]; then
-        ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+        ln -snf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
     elif [[ -e /run/systemd/resolve/resolv.conf ]]; then
-        ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
+        ln -snf /run/systemd/resolve/resolv.conf /etc/resolv.conf
     else
         warn "resolved is running, but no standard resolv.conf target was found."
     fi
@@ -471,6 +518,11 @@ test_dns() {
     local cf_bad=0 google_bad=0
     local cf_zero=0 google_zero=0
     local total_rounds=$(( ${#DOMAINS[@]} * ITERATIONS ))
+
+    if ! need_test_tools; then
+        warn "Test canceled."
+        return 1
+    fi
 
     echo "Test DNS"
     echo "$SUBLINE"
@@ -584,7 +636,7 @@ test_dns() {
 }
 
 show_status() {
-    local lock_text package_text mode_text
+    local package_text mode_text enabled_text active_text
     echo "Status"
     echo "$SUBLINE"
     echo
@@ -612,10 +664,14 @@ show_status() {
 
     echo
     echo -n "lock   : "
-    if is_locked; then
-        ok "yes"
+    if command_exists lsattr; then
+        if is_locked; then
+            ok "yes"
+        else
+            warn "no"
+        fi
     else
-        warn "no"
+        warn "unknown (lsattr missing)"
     fi
 
     echo
@@ -628,23 +684,28 @@ show_status() {
 
     echo
     echo "resolved"
-    package_text="$(if pkg_installed systemd-resolved; then echo installed; else echo purged; fi)"
+    package_text="$(if pkg_installed systemd-resolved; then echo installed; else echo not installed; fi)"
     echo -n "package : "
     if [[ "$package_text" == "installed" ]]; then ok "$package_text"; else err "$package_text"; fi
-    echo
-    echo -n "enabled : "
-    case "$(enabled_state systemd-resolved)" in
-        enabled) ok "enabled" ;;
-        masked) warn "masked" ;;
-        *) warn "$(enabled_state systemd-resolved)" ;;
-    esac
-    echo
-    echo -n "active  : "
-    case "$(service_state systemd-resolved)" in
-        active) ok "active" ;;
-        inactive|failed) warn "$(service_state systemd-resolved)" ;;
-        *) warn "$(service_state systemd-resolved)" ;;
-    esac
+
+    if pkg_installed systemd-resolved; then
+        enabled_text="$(enabled_state systemd-resolved)"
+        active_text="$(service_state systemd-resolved)"
+        echo
+        echo -n "enabled : "
+        case "$enabled_text" in
+            enabled) ok "$enabled_text" ;;
+            masked) warn "$enabled_text" ;;
+            *) warn "$enabled_text" ;;
+        esac
+        echo
+        echo -n "active  : "
+        case "$active_text" in
+            active) ok "$active_text" ;;
+            inactive|failed) warn "$active_text" ;;
+            *) warn "$active_text" ;;
+        esac
+    fi
 
     echo
     echo "profile"
@@ -656,6 +717,10 @@ show_status() {
 }
 
 unlock_only() {
+    if ! need_lock_tools; then
+        warn "Canceled."
+        return 1
+    fi
     unlock_resolv
     if is_locked; then
         warn "Unlock failed."
@@ -680,28 +745,31 @@ main_menu() {
         echo
         echo "0) Exit"
         echo
-        read -r -p "Choose [0-5]: " action
+        if ! read -r -p "Choose [0-5]: " action; then
+            clear_screen
+            return 0
+        fi
         echo
 
         case "$action" in
             1)
-                test_dns
+                test_dns || true
                 pause
                 ;;
             2)
                 if choose_profile; then
-                    apply_locked_file
+                    apply_locked_file || true
                 fi
                 pause
                 ;;
             3)
                 if choose_profile; then
-                    reinstall_resolved_apply
+                    reinstall_resolved_apply || true
                 fi
                 pause
                 ;;
             4)
-                unlock_only
+                unlock_only || true
                 pause
                 ;;
             5)
@@ -721,5 +789,4 @@ main_menu() {
 }
 
 need_root
-ensure_tools
 main_menu
