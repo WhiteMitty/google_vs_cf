@@ -1,263 +1,238 @@
 # google_vs_cf
 
-A small interactive Bash utility for Debian-based systems to compare **Cloudflare DNS** and **Google Public DNS**, then apply the preferred resolver profile either as a **locked `/etc/resolv.conf`** or through **`systemd-resolved`**.
+A small interactive Bash utility for Debian-based systems that compares **Cloudflare DNS** and **Google Public DNS**, then lets you apply the resolver profile you prefer.
 
-Designed for users who want a simple terminal workflow to:
+It can:
 
 - benchmark `1.1.1.1` vs `8.8.8.8`
-- inspect current resolver state
-- force a resolver profile into `/etc/resolv.conf` and lock it
+- show current DNS / `resolv.conf` status
+- write a fixed `/etc/resolv.conf` and try to lock it with `chattr +i`
 - reinstall and configure `systemd-resolved`
 - unlock `/etc/resolv.conf` when needed
 
 ---
 
-## Highlights
+## Features
 
-- Interactive terminal menu
-- Root privilege check before execution
-- DNS comparison between:
-  - **Cloudflare**: `1.1.1.1`
-  - **Google**: `8.8.8.8`
-- Four ready-to-use profiles:
-  - `CF Dual` → `1.1.1.1`, `1.0.0.1`
-  - `Google Dual` → `8.8.8.8`, `8.8.4.4`
-  - `CF First` → `1.1.1.1`, `8.8.8.8`
-  - `Google First` → `8.8.8.8`, `1.1.1.1`
-- Better-formatted domain display and aligned menu output
-- Automatic dependency prompts for test and lock operations
-- Resolver state inspection for:
-  - `/etc/resolv.conf` mode
-  - immutable lock status
-  - `systemd-resolved` package / enabled / active state
-  - active resolver profile drop-in
-
----
-
-## DNS Test Method
-
-The script tests the following public resolvers:
-
-- **Cloudflare** → `1.1.1.1`
-- **Google** → `8.8.8.8`
-
-It queries a fixed domain set, including:
-
-- `x.com`
-- `bbc.com`
-- `twitch.tv`
-- `intel.com`
-- `apple.com`
-- `amazon.com`
-- `fastly.com`
-- `akamai.com`
-- `google.com`
-- `github.com`
-- `youtube.com`
-- `netflix.com`
-- `telegram.org`
-- `bilibili.com`
-- `wikipedia.org`
-- `microsoft.com`
-- `instagram.com`
-- `aws.amazon.com`
-- `steampowered.com`
-
-### Sampling model
-
-This version uses a **round-robin sampling strategy** across domains.
-
-Instead of querying one domain repeatedly before moving to the next, the script rotates across the domain list in rounds. This reduces hot-cache bias and gives a fairer comparison between resolvers.
-
-### Test count
-
+- interactive terminal menu
+- root check before any operation
+- 4 built-in DNS profiles
 - **20 rounds per domain**
-- query type: **A**
-- `dig` timeout per query: **2 seconds**
-
-### 0 ms policy
-
-**`0 ms` results are intentionally preserved as counts but excluded from statistics and recommendation logic.**
-
-That means:
-
-- they are shown in the output
-- they are **not** included in `avg`, `median`, `p90`, or final score
-
-This avoids letting cache-granularity artifacts distort the recommendation.
+- **round-robin sampling** across domains to reduce hot-cache bias
+- **P90** added to the result table
+- **0 ms is kept as a count but excluded from scoring**
+- aligned menu and cleaner domain layout
+- automatic prompt to install missing packages when needed
 
 ---
 
-## Metrics
+## Supported profiles
 
-For each domain and for the total result, the script shows:
-
-- **Min**
-- **Max**
-- **Avg**
-- **Median**
-- **P90**
-- **Bad**
-- **0ms**
-
-### Meaning of `Bad`
-
-A result is counted as **bad** when the query fails, times out, or does not return a usable `NOERROR` result with a valid numeric query time.
-
----
-
-## Scoring Model
-
-The current scoring model is:
-
-```text
-score = median + 0.35*(p90 - median) + 0.10*(avg - median) + 25*bad_ratio
-```
-
-Lower is better.
-
-### Why this model
-
-The script does **not** rank resolvers by average latency alone.
-It favors a more stable resolver by prioritizing:
-
-1. **lower bad ratio**
-2. **lower median latency**
-3. **lower p90 latency**
-4. **lower average latency**
-
-This helps avoid choosing a resolver that looks fast on average but is unstable or has worse tail latency.
-
----
-
-## Menu Functions
-
-### 1) Test DNS
-Runs the resolver comparison and prints:
-
-- per-domain results
-- total results for each resolver
-- summary table
-- final recommendation
-
-### 2) Force apply + lock
-Disables `systemd-resolved`, writes the selected DNS profile directly into `/etc/resolv.conf`, and then tries to make the file immutable with `chattr +i`.
-
-This is useful when you want a fixed resolver setup that resists automatic overwrite.
-
-### 3) Reinstall resolved + apply
-Reinstalls `systemd-resolved`, writes a drop-in config under:
-
-```text
-/etc/systemd/resolved.conf.d/99-google-vs-cf.conf
-```
-
-and then points `/etc/resolv.conf` to the proper resolved file.
-
-### 4) Unlock only
-Removes the immutable flag from `/etc/resolv.conf` if present.
-
-### 5) Show status
-Displays:
-
-- current `/etc/resolv.conf` mode
-- lock status
-- file contents
-- `systemd-resolved` status
-- active profile file contents
+- **CF Dual** → `1.1.1.1` then `1.0.0.1`
+- **Google Dual** → `8.8.8.8` then `8.8.4.4`
+- **CF First** → `1.1.1.1` then `8.8.8.8`
+- **Google First** → `8.8.8.8` then `1.1.1.1`
 
 ---
 
 ## Requirements
 
-- Debian or Debian-like environment with `apt-get`
-- Bash
-- root privileges
+- Debian or Debian-like system
+- `bash`
+- `apt-get`
+- **root privileges to run the script**
 
-The script can prompt to install missing packages when needed, including tools such as:
+The script can prompt to install missing tools such as:
 
-- `dnsutils` or `bind9-dnsutils`
+- `bind9-dnsutils` or `dnsutils`
 - `coreutils`
-- `gawk`
 - `e2fsprogs`
+- `gawk`
 - `systemd-resolved`
 
 ---
 
-## Usage
+## Download
+
+### curl
 
 ```bash
-sudo bash google_vs_cf_v0.1.1.sh
+curl -fsSL -o google_vs_cf.sh https://raw.githubusercontent.com/WhiteMitty/google_vs_cf/main/google_vs_cf.sh
+chmod +x google_vs_cf.sh
 ```
 
-If you keep the original filename:
+### wget
 
 ```bash
-sudo bash google_vs_cf.sh
+wget -O google_vs_cf.sh https://raw.githubusercontent.com/WhiteMitty/google_vs_cf/main/google_vs_cf.sh
+chmod +x google_vs_cf.sh
 ```
 
 ---
 
-## Typical Workflow
+## Run
+
+**Run it from a root shell.**
+
+If you are not root yet:
+
+```bash
+su -
+```
+
+Then run:
+
+```bash
+bash google_vs_cf.sh
+```
+
+If you are already in a root shell, just run the command above directly.
+
+---
+
+## Menu
+
+### 1) Test DNS
+
+Compares:
+
+- Cloudflare → `1.1.1.1`
+- Google → `8.8.8.8`
+
+The script tests a fixed domain set and prints per-domain and total results.
+
+Shown metrics:
+
+- `Min`
+- `Max`
+- `Avg`
+- `Median`
+- `P90`
+- `Bad`
+- `0ms`
+
+### 2) Force apply + lock
+
+- stops / disables / masks `systemd-resolved`
+- writes the selected profile directly into `/etc/resolv.conf`
+- tries to apply `chattr +i`
+
+### 3) Reinstall resolved
+
+- reinstalls `systemd-resolved`
+- writes a drop-in profile under:
+
+```text
+/etc/systemd/resolved.conf.d/99-google-vs-cf.conf
+```
+
+- repoints `/etc/resolv.conf` to the resolved-managed file
+
+### 4) Unlock only
+
+Removes the immutable bit from `/etc/resolv.conf` if present.
+
+### 5) Show status
+
+Displays:
+
+- current `/etc/resolv.conf` mode
+- immutable lock state
+- current file content
+- `systemd-resolved` package / enabled / active status
+- active drop-in profile content
+
+---
+
+## Test method
+
+This release uses a more stable test model:
+
+- **20 rounds per domain**
+- query type: **A**
+- `dig` timeout: **2 seconds**
+- **round-robin** rotation across domains instead of querying one domain repeatedly in a block
+
+This helps reduce sequential cache bias and makes the comparison fairer.
+
+---
+
+## 0 ms policy
+
+`0 ms` results are **not treated as normal latency samples**.
+
+They are:
+
+- counted
+- shown in the table
+- **excluded** from `Avg`, `Median`, `P90`, and final score
+
+This behavior is intentional.
+
+---
+
+## Recommendation logic
+
+The script recommends a resolver in this order:
+
+1. lower bad ratio
+2. lower median
+3. lower p90
+4. lower average
+
+A score is also shown for sorting and comparison:
+
+```text
+score = median + 0.35*(p90-median) + 0.10*(avg-median) + 25*bad_ratio
+```
+
+Lower is better.
+
+---
+
+## Typical workflow
 
 ### Benchmark only
 
-1. Run the script
-2. Choose **Test DNS**
-3. Review the summary and recommendation
-4. Exit without changing the system
+```bash
+su -
+bash google_vs_cf.sh
+```
 
-### Lock a preferred resolver profile
+Then choose `Test DNS` and review the result.
 
-1. Run **Test DNS**
-2. Decide which profile you want
-3. Choose **Force apply + lock**
-4. Select the DNS profile
-5. Confirm the operation
+### Apply a fixed resolver and lock it
 
-### Return to a `systemd-resolved` setup
+1. run `Test DNS`
+2. decide which profile you want
+3. choose `Force apply + lock`
+4. confirm the write and lock operation
 
-1. Choose **Reinstall resolved + apply**
-2. Select the profile
-3. Confirm the operation
+### Return to a resolved-managed setup
 
----
-
-## Safety Notes
-
-- The script modifies `/etc/resolv.conf`
-- It may **disable, mask, or reinstall** `systemd-resolved`
-- It may apply the immutable bit to `/etc/resolv.conf`
-- Run it only if you understand how your system currently manages DNS
-
-For remote servers, confirm you have a fallback access path before changing resolver settings.
+1. choose `Reinstall resolved`
+2. select the profile
+3. confirm the operation
 
 ---
 
-## Design Notes
+## Safety notes
 
-This release intentionally keeps several practical behaviors:
+This script changes system DNS behavior.
 
-- **0 ms results remain excluded from scoring**
-- **20 rounds per domain** for better sample depth
-- **round-robin querying** to reduce sequential cache bias
-- **P90** is included to reflect tail behavior
-- recommendation is based on **stability first, then latency**
+It may:
+
+- overwrite `/etc/resolv.conf`
+- disable / mask `systemd-resolved`
+- reinstall `systemd-resolved`
+- apply the immutable bit to `/etc/resolv.conf`
+
+Use it only when you understand how your current system manages DNS.
+
+For remote servers, make sure you still have a safe fallback access path before applying changes.
 
 ---
 
 ## License
 
-Add your preferred license here if you plan to publish the project publicly.
-
-For example:
-
-- MIT
-- Apache-2.0
-- GPL-3.0
-
----
-
-## Author
-
-**Doudou Zhang**
+This repository currently uses the MIT License.

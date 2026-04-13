@@ -3,7 +3,7 @@
 set -euo pipefail
 
 APP_NAME="google_vs_cf"
-VERSION="0.1.1"
+VERSION="0.1.2"
 AUTHOR="Doudou Zhang"
 
 TEST_DNS=("1.1.1.1" "8.8.8.8")
@@ -81,7 +81,7 @@ print_domain_grid() {
 
 need_root() {
     if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-        err "Run as root: sudo bash google_vs_cf.sh"
+        err "Please run this script as root."
         exit 1
     fi
 }
@@ -741,11 +741,14 @@ test_dns() {
                 esac
 
                 query_done=$((query_done + 1))
-                printf "${C_DIM}  Progress : %3d/%3d  (round %02d/%02d)${C_RESET}" "$query_done" "$query_total" "$round" "$ITERATIONS" >&2
+                printf "
+${C_DIM}  Progress : %3d/%3d  (round %02d/%02d)${C_RESET}" "$query_done" "$query_total" "$round" "$ITERATIONS" >&2
                 sleep 0.03
             done
         done
-        printf "%*s" 72 "" >&2
+        printf "
+%*s
+" 72 "" >&2
 
         for domain in "${DOMAINS[@]}"; do
             times=()
@@ -767,11 +770,11 @@ test_dns() {
         if [[ ${#all_times[@]} -gt 0 ]]; then
             read -r min max avg median p90 <<< "$(calc_stats "${all_times[@]}")"
             score=$(calc_score "$avg" "$median" "$p90" "$total_bad" "$total_rounds")
-            summary_rows+=("$score|$label|$dns|$avg|$median|$p90|$total_bad|$total_zero")
+            summary_rows+=("$score|$score|$label|$dns|$avg|$median|$p90|$total_bad|$total_zero")
             fmt_row "TOTAL" "$min" "$max" "$avg" "$median" "$p90" "$total_bad" "$total_zero" "$C_OK"
         else
             score="N/A"
-            summary_rows+=("999999|$label|$dns|N/A|N/A|N/A|$total_bad|$total_zero")
+            summary_rows+=("999999|N/A|$label|$dns|N/A|N/A|N/A|$total_bad|$total_zero")
             fmt_row "TOTAL" "N/A" "N/A" "N/A" "N/A" "N/A" "$total_bad" "$total_zero" "$C_OK"
         fi
 
@@ -792,8 +795,8 @@ test_dns() {
     fmt_summary_header
     echo "$SUBLINE"
     printf "%s
-" "${summary_rows[@]}" | sort -t'|' -k1,1g | while IFS='|' read -r score label dns avg median p90 bad zero; do
-        fmt_summary_row "${label} @${dns}" "$avg" "$median" "$p90" "$bad" "$zero" "$score"
+" "${summary_rows[@]}" | sort -t'|' -k1,1g | while IFS='|' read -r sort_key score_display label dns avg median p90 bad zero; do
+        fmt_summary_row "${label} @${dns}" "$avg" "$median" "$p90" "$bad" "$zero" "$score_display"
     done
 
     print_recommendation \
