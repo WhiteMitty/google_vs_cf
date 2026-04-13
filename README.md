@@ -1,6 +1,6 @@
 # google_vs_cf
 
-Compare Cloudflare DNS and Google DNS.
+Compare Cloudflare DNS and Google DNS, select the better one and lock it.
 
 ## Features
 - Test `1.1.1.1` vs `8.8.8.8`
