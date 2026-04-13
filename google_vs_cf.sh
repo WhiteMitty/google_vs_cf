@@ -3,7 +3,7 @@
 set -euo pipefail
 
 APP_NAME="google_vs_cf"
-VERSION="0.1.0"
+VERSION="0.1.1"
 AUTHOR="Doudou Zhang"
 
 TEST_DNS=("1.1.1.1" "8.8.8.8")
@@ -15,7 +15,7 @@ DOMAINS=(
     "telegram.org"   "bilibili.com"   "wikipedia.org"    "microsoft.com"
     "instagram.com"  "aws.amazon.com" "steampowered.com"   
 )
-ITERATIONS=12
+ITERATIONS=20
 DIG_TIMEOUT=2
 OUTER_TIMEOUT=$((DIG_TIMEOUT + 1))
 QTYPE="A"
@@ -49,6 +49,35 @@ ok()   { echo "${C_OK}$*${C_RESET}"; }
 warn() { echo "${C_WARN}$*${C_RESET}"; }
 err()  { echo "${C_ERR}$*${C_RESET}"; }
 info() { echo "${C_INFO}$*${C_RESET}"; }
+
+print_menu_item() {
+    local key="$1"
+    local title="$2"
+    local desc="$3"
+    printf " %b%s%b) %-24s %s\n" "$C_INFO" "$key" "$C_RESET" "$title" "$desc"
+}
+
+print_profile_item() {
+    local key="$1"
+    local title="$2"
+    local path="$3"
+    printf " %b%s%b) %-14s %s\n" "$C_INFO" "$key" "$C_RESET" "$title" "$path"
+}
+
+print_domain_grid() {
+    local cols=3
+    local width=22
+    local i j idx
+    for ((i=0; i<${#DOMAINS[@]}; i+=cols)); do
+        for ((j=0; j<cols; j++)); do
+            idx=$((i + j))
+            if (( idx < ${#DOMAINS[@]} )); then
+                printf "  %b%02d%b) %b%-*s%b"                     "$C_DIM" "$((idx + 1))" "$C_RESET"                     "$C_INFO" "$width" "${DOMAINS[$idx]}" "$C_RESET"
+            fi
+        done
+        printf "\n"
+    done
+}
 
 need_root() {
     if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -216,49 +245,139 @@ need_lock_tools() {
 
 calc_stats() {
     if [[ $# -eq 0 ]]; then
-        echo "N/A N/A N/A N/A"
+        echo "N/A N/A N/A N/A N/A"
         return 0
     fi
-    printf "%s\n" "$@" | sort -n | awk '
+    printf "%s
+" "$@" | sort -n | awk '
     { arr[++count]=$1; sum+=$1 }
     END {
-        if (!count) { printf "N/A N/A N/A N/A"; exit }
-        min=arr[1]; max=arr[count]; avg=sum/count
+        if (!count) { printf "N/A N/A N/A N/A N/A"; exit }
+        min=arr[1]
+        max=arr[count]
+        avg=sum/count
         median=(count%2==1) ? arr[(count+1)/2] : (arr[count/2]+arr[count/2+1])/2
-        printf "%d %d %.2f %.2f", min, max, avg, median
+        p90_index=int((count * 9 + 9) / 10)
+        if (p90_index < 1) p90_index=1
+        if (p90_index > count) p90_index=count
+        p90=arr[p90_index]
+        printf "%d %d %.2f %.2f %.2f", min, max, avg, median, p90
     }'
 }
 
 calc_score() {
     local avg="$1"
     local median="$2"
-    local bad="$3"
-    local total_rounds="$4"
-    awk -v avg="$avg" -v median="$median" -v bad="$bad" -v total="$total_rounds" 'BEGIN {
-        if (avg == "N/A" || median == "N/A") {
+    local p90="$3"
+    local bad="$4"
+    local total_rounds="$5"
+    awk -v avg="$avg" -v median="$median" -v p90="$p90" -v bad="$bad" -v total="$total_rounds" 'BEGIN {
+        if (avg == "N/A" || median == "N/A" || p90 == "N/A") {
             print "N/A"
             exit
         }
         bad_ratio = (total > 0) ? bad / total : 1
-        score = (median * 0.72) + (avg * 0.23) + (bad_ratio * 18)
+        tail_penalty = (p90 > median) ? (p90 - median) : 0
+        skew_penalty = (avg > median) ? (avg - median) : 0
+        score = median + (tail_penalty * 0.35) + (skew_penalty * 0.10) + (bad_ratio * 25)
         printf "%.2f", score
     }'
 }
 
+calc_bad_ratio() {
+    local bad="$1"
+    local total="$2"
+    awk -v bad="$bad" -v total="$total" 'BEGIN {
+        if (total <= 0) {
+            printf "1.0000"
+            exit
+        }
+        printf "%.4f", bad / total
+    }'
+}
+
+dns_a_is_better() {
+    local bad_a="$1"
+    local total_a="$2"
+    local median_a="$3"
+    local p90_a="$4"
+    local avg_a="$5"
+    local score_a="$6"
+    local bad_b="$7"
+    local total_b="$8"
+    local median_b="$9"
+    local p90_b="${10}"
+    local avg_b="${11}"
+    local score_b="${12}"
+
+    awk \
+        -v bad_a="$bad_a" -v total_a="$total_a" -v median_a="$median_a" -v p90_a="$p90_a" -v avg_a="$avg_a" -v score_a="$score_a" \
+        -v bad_b="$bad_b" -v total_b="$total_b" -v median_b="$median_b" -v p90_b="$p90_b" -v avg_b="$avg_b" -v score_b="$score_b" \
+        'BEGIN {
+            ratio_a = (total_a > 0) ? bad_a / total_a : 1
+            ratio_b = (total_b > 0) ? bad_b / total_b : 1
+
+            if (ratio_a < ratio_b) exit 0
+            if (ratio_a > ratio_b) exit 1
+
+            if (median_a < median_b) exit 0
+            if (median_a > median_b) exit 1
+
+            if (p90_a < p90_b) exit 0
+            if (p90_a > p90_b) exit 1
+
+            if (avg_a < avg_b) exit 0
+            if (avg_a > avg_b) exit 1
+
+            if (score_a == "N/A" && score_b == "N/A") exit 0
+            if (score_a == "N/A") exit 1
+            if (score_b == "N/A") exit 0
+
+            exit !(score_a <= score_b)
+        }'
+}
+
 fmt_header() {
-    printf "%-18s | %-6s | %-6s | %-7s | %-7s | %-4s\n" "$1" "Min" "Max" "Avg" "Median" "Bad"
+    printf "%b%-20s%b | %-5s | %-5s | %-7s | %-7s | %-7s | %-4s | %-4s
+" \
+        "$C_TITLE" "$1" "$C_RESET" "Min" "Max" "Avg" "Median" "P90" "Bad" "0ms"
 }
 
 fmt_row() {
-    printf "%-18s | %-6s | %-6s | %-7s | %-7s | %-4s\n" "$1" "$2" "$3" "$4" "$5" "$6"
+    local label="$1"
+    local min="$2"
+    local max="$3"
+    local avg="$4"
+    local median="$5"
+    local p90="$6"
+    local bad="$7"
+    local zero="$8"
+    local color="${9:-$C_INFO}"
+
+    printf "%b%-20s%b | %-5s | %-5s | %-7s | %-7s | %-7s | %-4s | %-4s
+" \
+        "$color" "$label" "$C_RESET" "$min" "$max" "$avg" "$median" "$p90" "$bad" "$zero"
 }
 
 fmt_summary_header() {
-    printf "%-18s | %-7s | %-7s | %-4s | %-6s\n" "DNS" "Avg" "Median" "Bad" "Score"
+    printf "%b%-22s%b | %-7s | %-7s | %-7s | %-4s | %-4s | %-6s
+" \
+        "$C_TITLE" "Resolver" "$C_RESET" "Avg" "Median" "P90" "Bad" "0ms" "Score"
 }
 
 fmt_summary_row() {
-    printf "%-18s | %-7s | %-7s | %-4s | %-6s\n" "$1" "$2" "$3" "$4" "$5"
+    local label="$1"
+    local avg="$2"
+    local median="$3"
+    local p90="$4"
+    local bad="$5"
+    local zero="$6"
+    local score="$7"
+    local color="${8:-$C_INFO}"
+
+    printf "%b%-22s%b | %-7s | %-7s | %-7s | %-4s | %-4s | %-6s
+" \
+        "$color" "$label" "$C_RESET" "$avg" "$median" "$p90" "$bad" "$zero" "$score"
 }
 
 choose_profile() {
@@ -266,15 +385,15 @@ choose_profile() {
         echo "DNS profiles"
         echo "$SUBLINE"
         echo
-        echo "1) CF Dual        1.1.1.1  ->  1.0.0.1"
+        print_profile_item "1" "CF Dual"      "1.1.1.1  ->  1.0.0.1"
         echo
-        echo "2) Google Dual    8.8.8.8  ->  8.8.4.4"
+        print_profile_item "2" "Google Dual"  "8.8.8.8  ->  8.8.4.4"
         echo
-        echo "3) CF First       1.1.1.1  ->  8.8.8.8"
+        print_profile_item "3" "CF First"     "1.1.1.1  ->  8.8.8.8"
         echo
-        echo "4) Google First   8.8.8.8  ->  1.1.1.1"
+        print_profile_item "4" "Google First" "8.8.8.8  ->  1.1.1.1"
         echo
-        echo "0) Back"
+        print_profile_item "0" "Back"         "return to main menu"
         echo
         if ! read -r -p "Choose [0-4]: " choice; then
             echo
@@ -436,10 +555,13 @@ print_recommendation() {
     local google_avg="$4"
     local cf_median="$5"
     local google_median="$6"
-    local cf_bad="$7"
-    local google_bad="$8"
-    local cf_zero="$9"
-    local google_zero="${10}"
+    local cf_p90="$7"
+    local google_p90="$8"
+    local cf_bad="$9"
+    local google_bad="${10}"
+    local cf_zero="${11}"
+    local google_zero="${12}"
+    local total_rounds="${13}"
 
     echo
     echo "Recommendation"
@@ -461,15 +583,25 @@ print_recommendation() {
         return 0
     fi
 
-    local winner loser winner_score loser_score winner_avg winner_median winner_bad
-    if awk -v a="$cf_score" -v b="$google_score" 'BEGIN { exit !(a <= b) }'; then
+    local winner loser winner_score loser_score winner_avg winner_median winner_p90 winner_bad winner_zero
+    local loser_avg loser_median loser_p90 loser_bad loser_zero
+
+    if dns_a_is_better "$cf_bad" "$total_rounds" "$cf_median" "$cf_p90" "$cf_avg" "$cf_score" \
+                        "$google_bad" "$total_rounds" "$google_median" "$google_p90" "$google_avg" "$google_score"; then
         winner="Cloudflare"
         loser="Google"
         winner_score="$cf_score"
         loser_score="$google_score"
         winner_avg="$cf_avg"
         winner_median="$cf_median"
+        winner_p90="$cf_p90"
         winner_bad="$cf_bad"
+        winner_zero="$cf_zero"
+        loser_avg="$google_avg"
+        loser_median="$google_median"
+        loser_p90="$google_p90"
+        loser_bad="$google_bad"
+        loser_zero="$google_zero"
     else
         winner="Google"
         loser="Cloudflare"
@@ -477,40 +609,52 @@ print_recommendation() {
         loser_score="$cf_score"
         winner_avg="$google_avg"
         winner_median="$google_median"
+        winner_p90="$google_p90"
         winner_bad="$google_bad"
+        winner_zero="$google_zero"
+        loser_avg="$cf_avg"
+        loser_median="$cf_median"
+        loser_p90="$cf_p90"
+        loser_bad="$cf_bad"
+        loser_zero="$cf_zero"
     fi
 
-    local diff level
+    local diff level winner_ratio loser_ratio
     diff=$(awk -v a="$winner_score" -v b="$loser_score" 'BEGIN { d=b-a; if (d < 0) d=-d; printf "%.2f", d }')
+    winner_ratio=$(calc_bad_ratio "$winner_bad" "$total_rounds")
+    loser_ratio=$(calc_bad_ratio "$loser_bad" "$total_rounds")
 
-    if awk -v d="$diff" 'BEGIN { exit !(d < 1.2) }'; then
+    if awk -v d="$diff" 'BEGIN { exit !(d < 0.80) }'; then
         level="Slight edge"
-    elif awk -v d="$diff" 'BEGIN { exit !(d < 3.2) }'; then
+    elif awk -v d="$diff" 'BEGIN { exit !(d < 2.20) }'; then
         level="Recommended"
     else
         level="Strongly recommended"
     fi
 
     ok "$level: $winner"
-    echo "Why     : lower median first, lower average second, fewer bad results helps."
+    echo "Why     : lower bad ratio first, then lower median, then lower p90, then lower average."
     echo "Score   : $winner $winner_score  vs  $loser $loser_score"
-    echo "Winner  : median $winner_median ms, avg $winner_avg ms, bad $winner_bad"
+    echo "Winner  : bad $winner_bad/$total_rounds ($winner_ratio), median $winner_median ms, p90 $winner_p90 ms, avg $winner_avg ms"
+    echo "Loser   : bad $loser_bad/$total_rounds ($loser_ratio), median $loser_median ms, p90 $loser_p90 ms, avg $loser_avg ms"
 
     if (( cf_zero > 0 || google_zero > 0 )); then
         echo "Zero ms : ignored in stats and recommendation."
     fi
 
-    if (( cf_bad > 0 || google_bad > 0 )); then
-        echo "Note    : bad results add a mild penalty."
-    fi
+    echo "Model   : score = median + 0.35*(p90-median) + 0.10*(avg-median) + 25*bad_ratio"
+    echo "Method  : round-robin sampling across domains, $ITERATIONS rounds per domain."
 }
 
 test_dns() {
-    local dns label domain output rc qtime status bad_count zero_count total_bad total_zero min max avg median score idx i
-    local -a times=() all_times=() summary_rows=()
+    local dns label domain output rc qtime status min max avg median p90 score idx round step domain_count start_offset query_done query_total total_bad total_zero
+    local bad_count zero_count
+    local -a all_times=() times=() summary_rows=()
+    local -A domain_time_map=() domain_bad_map=() domain_zero_map=()
     local cf_score="N/A" google_score="N/A"
     local cf_avg="N/A" google_avg="N/A"
     local cf_median="N/A" google_median="N/A"
+    local cf_p90="N/A" google_p90="N/A"
     local cf_bad=0 google_bad=0
     local cf_zero=0 google_zero=0
     local total_rounds=$(( ${#DOMAINS[@]} * ITERATIONS ))
@@ -526,12 +670,17 @@ test_dns() {
     echo "Targets : 1.1.1.1 vs 8.8.8.8"
     echo
     echo "Domains :"
-    printf "  %-18s %-18s %-18s %-18s\n" "${DOMAINS[@]}"
+    print_domain_grid
     echo
-    echo "Rounds  : $ITERATIONS"
+    echo "Rounds  : $ITERATIONS per domain"
+    echo
+    echo "Method  : round-robin across domains to reduce hot-cache bias"
     echo
     echo "Rule    : 0 ms is ignored in stats and recommendation"
     echo
+
+    domain_count=${#DOMAINS[@]}
+    query_total=$(( domain_count * ITERATIONS ))
 
     for idx in 0 1; do
         dns="${TEST_DNS[$idx]}"
@@ -544,15 +693,21 @@ test_dns() {
         all_times=()
         total_bad=0
         total_zero=0
+        query_done=0
 
         for domain in "${DOMAINS[@]}"; do
-            times=()
-            bad_count=0
-            zero_count=0
+            domain_time_map["$domain"]=""
+            domain_bad_map["$domain"]=0
+            domain_zero_map["$domain"]=0
+        done
 
-            for ((i=1; i<=ITERATIONS; i++)); do
+        for ((round=1; round<=ITERATIONS; round++)); do
+            start_offset=$(( (round - 1) % domain_count ))
+            for ((step=0; step<domain_count; step++)); do
+                domain="${DOMAINS[$(((start_offset + step) % domain_count))]}"
                 output=""
                 rc=0
+
                 if output=$(timeout "${OUTER_TIMEOUT}s" dig @"$dns" "$domain" "$QTYPE" \
                     +tries=1 +time="$DIG_TIMEOUT" \
                     +noquestion +noanswer +noauthority +noadditional +nostats \
@@ -568,45 +723,56 @@ test_dns() {
                         status=$(awk '/^;; ->>HEADER<<-/ { s=$0; sub(/.*status: /, "", s); sub(/,.*/, "", s); print s; exit }' <<< "$output")
                         if [[ "$status" == "NOERROR" && "$qtime" =~ ^[0-9]+$ ]]; then
                             if (( qtime > 0 )); then
-                                times+=("$qtime")
+                                domain_time_map["$domain"]+="${qtime} "
                                 all_times+=("$qtime")
                             else
-                                zero_count=$((zero_count + 1))
+                                domain_zero_map["$domain"]=$(( ${domain_zero_map["$domain"]} + 1 ))
+                                total_zero=$(( total_zero + 1 ))
                             fi
                         else
-                            bad_count=$((bad_count + 1))
+                            domain_bad_map["$domain"]=$(( ${domain_bad_map["$domain"]} + 1 ))
+                            total_bad=$(( total_bad + 1 ))
                         fi
                         ;;
                     *)
-                        bad_count=$((bad_count + 1))
+                        domain_bad_map["$domain"]=$(( ${domain_bad_map["$domain"]} + 1 ))
+                        total_bad=$(( total_bad + 1 ))
                         ;;
                 esac
 
-                printf "." >&2
+                query_done=$((query_done + 1))
+                printf "${C_DIM}  Progress : %3d/%3d  (round %02d/%02d)${C_RESET}" "$query_done" "$query_total" "$round" "$ITERATIONS" >&2
                 sleep 0.03
             done
+        done
+        printf "%*s" 72 "" >&2
 
-            total_bad=$((total_bad + bad_count))
-            total_zero=$((total_zero + zero_count))
-            printf "\r" >&2
+        for domain in "${DOMAINS[@]}"; do
+            times=()
+            bad_count="${domain_bad_map["$domain"]}"
+            zero_count="${domain_zero_map["$domain"]}"
+
+            if [[ -n "${domain_time_map["$domain"]// /}" ]]; then
+                read -r -a times <<< "${domain_time_map["$domain"]}"
+            fi
 
             if [[ ${#times[@]} -gt 0 ]]; then
-                read -r min max avg median <<< "$(calc_stats "${times[@]}")"
-                fmt_row "$domain" "$min" "$max" "$avg" "$median" "$bad_count"
+                read -r min max avg median p90 <<< "$(calc_stats "${times[@]}")"
+                fmt_row "$domain" "$min" "$max" "$avg" "$median" "$p90" "$bad_count" "$zero_count"
             else
-                fmt_row "$domain" "N/A" "N/A" "N/A" "N/A" "$bad_count"
+                fmt_row "$domain" "N/A" "N/A" "N/A" "N/A" "N/A" "$bad_count" "$zero_count"
             fi
         done
 
         if [[ ${#all_times[@]} -gt 0 ]]; then
-            read -r min max avg median <<< "$(calc_stats "${all_times[@]}")"
-            score=$(calc_score "$avg" "$median" "$total_bad" "$total_rounds")
-            summary_rows+=("$score|$dns|$label|$avg|$median|$total_bad|$total_zero")
-            fmt_row "TOTAL" "$min" "$max" "$avg" "$median" "$total_bad"
+            read -r min max avg median p90 <<< "$(calc_stats "${all_times[@]}")"
+            score=$(calc_score "$avg" "$median" "$p90" "$total_bad" "$total_rounds")
+            summary_rows+=("$score|$label|$dns|$avg|$median|$p90|$total_bad|$total_zero")
+            fmt_row "TOTAL" "$min" "$max" "$avg" "$median" "$p90" "$total_bad" "$total_zero" "$C_OK"
         else
             score="N/A"
-            summary_rows+=("999999|$dns|$label|N/A|N/A|$total_bad|$total_zero")
-            fmt_row "TOTAL" "N/A" "N/A" "N/A" "N/A" "$total_bad"
+            summary_rows+=("999999|$label|$dns|N/A|N/A|N/A|$total_bad|$total_zero")
+            fmt_row "TOTAL" "N/A" "N/A" "N/A" "N/A" "N/A" "$total_bad" "$total_zero" "$C_OK"
         fi
 
         echo
@@ -614,9 +780,9 @@ test_dns() {
         echo
 
         if [[ "$label" == "Cloudflare" ]]; then
-            cf_score="$score"; cf_avg="$avg"; cf_median="$median"; cf_bad="$total_bad"; cf_zero="$total_zero"
+            cf_score="$score"; cf_avg="$avg"; cf_median="$median"; cf_p90="$p90"; cf_bad="$total_bad"; cf_zero="$total_zero"
         else
-            google_score="$score"; google_avg="$avg"; google_median="$median"; google_bad="$total_bad"; google_zero="$total_zero"
+            google_score="$score"; google_avg="$avg"; google_median="$median"; google_p90="$p90"; google_bad="$total_bad"; google_zero="$total_zero"
         fi
     done
 
@@ -625,11 +791,19 @@ test_dns() {
     echo
     fmt_summary_header
     echo "$SUBLINE"
-    printf "%s\n" "${summary_rows[@]}" | sort -t'|' -k1,1g | while IFS='|' read -r score dns label avg median bad zero; do
-        fmt_summary_row "$dns" "$avg" "$median" "$bad" "$score"
+    printf "%s
+" "${summary_rows[@]}" | sort -t'|' -k1,1g | while IFS='|' read -r score label dns avg median p90 bad zero; do
+        fmt_summary_row "${label} @${dns}" "$avg" "$median" "$p90" "$bad" "$zero" "$score"
     done
 
-    print_recommendation "$cf_score" "$google_score" "$cf_avg" "$google_avg" "$cf_median" "$google_median" "$cf_bad" "$google_bad" "$cf_zero" "$google_zero"
+    print_recommendation \
+        "$cf_score" "$google_score" \
+        "$cf_avg" "$google_avg" \
+        "$cf_median" "$google_median" \
+        "$cf_p90" "$google_p90" \
+        "$cf_bad" "$google_bad" \
+        "$cf_zero" "$google_zero" \
+        "$total_rounds"
 }
 
 show_status() {
@@ -730,17 +904,17 @@ main_menu() {
     while true; do
         clear_screen
         print_header
-        echo "1) Test DNS"
+        print_menu_item "1" "Test DNS"                 "compare Cloudflare vs Google with round-robin sampling"
         echo
-        echo "2) Force apply + lock"
+        print_menu_item "2" "Force apply + lock"       "write resolv.conf directly and try immutable lock"
         echo
-        echo "3) Reinstall resolved + apply"
+        print_menu_item "3" "Reinstall resolved"       "reinstall systemd-resolved and apply selected profile"
         echo
-        echo "4) Unlock only"
+        print_menu_item "4" "Unlock only"              "remove immutable bit from /etc/resolv.conf"
         echo
-        echo "5) Show status"
+        print_menu_item "5" "Show status"              "inspect current mode, lock state, and active profile"
         echo
-        echo "0) Exit"
+        print_menu_item "0" "Exit"                     "leave without changing anything"
         echo
         if ! read -r -p "Choose [0-5]: " action; then
             clear_screen
