@@ -40,8 +40,7 @@ It can:
 - Debian or Debian-like system
 - `bash`
 - `apt-get`
-- **root privileges to run the script**
-- Please run this script as root.
+- root privileges
 
 The script can prompt to install missing tools such as:
 
