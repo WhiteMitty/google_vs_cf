@@ -561,7 +561,7 @@ main_menu() {
             5|05)
                 show_current_dns_state
                 ;;
-            0)
+            0|00)
                 echo "Bye."
                 break
                 ;;
