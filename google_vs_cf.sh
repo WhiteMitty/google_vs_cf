@@ -525,7 +525,8 @@ test_dns() {
     echo
     echo "Targets : 1.1.1.1 vs 8.8.8.8"
     echo
-    echo "Domains : ${DOMAINS[*]}"
+    echo "Domains :"
+    printf "  %-18s %-18s %-18s %-18s\n" "${DOMAINS[@]}"
     echo
     echo "Rounds  : $ITERATIONS"
     echo
