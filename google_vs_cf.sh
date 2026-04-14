@@ -12,7 +12,7 @@ DOMAINS=(
     "x.com"          "bbc.com"        "twitch.tv"        "intel.com"
     "apple.com"      "amazon.com"     "fastly.com"       "akamai.com"
     "google.com"     "github.com"     "youtube.com"      "netflix.com"
-    "telegram.org"   "bilibili.com"   "wikipedia.org"    "microsoft.com"
+    "telegram.org"   "tiktok.com"     "wikipedia.org"    "microsoft.com"
     "instagram.com"  "aws.amazon.com" "steampowered.com"   
 )
 ITERATIONS=20
