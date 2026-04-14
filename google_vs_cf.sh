@@ -1048,5 +1048,19 @@ main_menu() {
     done
 }
 
+SELF_PATH=""
+if [[ "${BASH_SOURCE[0]:-}" == "$0" && -f "$0" ]]; then
+    SELF_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf '%s' "$0")"
+fi
+
+cleanup_self() {
+    if [[ -n "$SELF_PATH" && -f "$SELF_PATH" ]]; then
+        rm -f -- "$SELF_PATH" 2>/dev/null || true
+    fi
+}
+
+trap cleanup_self EXIT INT TERM
+
 need_root
 main_menu
+exit 0
