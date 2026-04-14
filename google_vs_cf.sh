@@ -11,9 +11,9 @@ TEST_LABELS=("Cloudflare" "Google")
 DOMAINS=(
     "x.com"          "bbc.com"        "twitch.tv"        "intel.com"
     "apple.com"      "amazon.com"     "fastly.com"       "akamai.com"
-    "google.com"     "github.com"     "youtube.com"      "netflix.com"
-    "telegram.org"   "tiktok.com"     "wikipedia.org"    "microsoft.com"
-    "instagram.com"  "aws.amazon.com" "steampowered.com"   
+    "google.com"     "tiktok.com"     "github.com"       "youtube.com"      
+    "netflix.com"    "telegram.org"   "wikipedia.org"    "microsoft.com"
+    "instagram.com"  "aws.amazon.com" "disneyplus.com"   "steampowered.com"                      
 )
 ITERATIONS=20
 DIG_TIMEOUT=2
