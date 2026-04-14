@@ -376,8 +376,76 @@ fmt_summary_row() {
     local color="${8:-$C_INFO}"
 
     printf "%b%-22s%b | %-7s | %-7s | %-7s | %-4s | %-4s | %-6s
-" \
-        "$color" "$label" "$C_RESET" "$avg" "$median" "$p90" "$bad" "$zero" "$score"
+"         "$color" "$label" "$C_RESET" "$avg" "$median" "$p90" "$bad" "$zero" "$score"
+}
+
+fmt_compare_header() {
+    printf "%b%-20s%b | %-6s | %-6s | %-4s | %-4s || %-6s | %-6s | %-4s | %-4s
+"         "$C_TITLE" "Domain" "$C_RESET" "CF Med" "CF P90" "Bad" "0ms" "GG Med" "GG P90" "Bad" "0ms"
+}
+
+fmt_compare_row() {
+    local domain="$1"
+    local cf_median="$2"
+    local cf_p90="$3"
+    local cf_bad="$4"
+    local cf_zero="$5"
+    local google_median="$6"
+    local google_p90="$7"
+    local google_bad="$8"
+    local google_zero="$9"
+
+    printf "%-20s | %-6s | %-6s | %-4s | %-4s || %-6s | %-6s | %-4s | %-4s
+"         "$domain" "$cf_median" "$cf_p90" "$cf_bad" "$cf_zero" "$google_median" "$google_p90" "$google_bad" "$google_zero"
+}
+
+test_ui_begin() {
+    if [[ -t 1 ]]; then
+        printf '[?25l'
+    fi
+}
+
+test_ui_end() {
+    if [[ -t 1 ]]; then
+        printf '[?25h'
+    fi
+}
+
+draw_test_dashboard() {
+    local current_label="$1"
+    local current_domain="$2"
+    local query_done="$3"
+    local query_total="$4"
+    local current_round="$5"
+    local current_status="$6"
+    local -n cf_live_ref="$7"
+    local -n google_live_ref="$8"
+    local i domain cf_live google_live
+
+    [[ -t 1 ]] || return 0
+
+    printf '[H[2J'
+    echo "$LINE"
+    echo "${C_TITLE}${APP_NAME}${C_RESET}  v ${VERSION}  |  Live DNS test"
+    echo "$LINE"
+    echo
+    echo "Targets  : Cloudflare @1.1.1.1   |   Google @8.8.8.8"
+    echo "Progress : ${query_done}/${query_total}   |   Round ${current_round}/${ITERATIONS}"
+    echo "Current  : ${current_label}  ->  ${current_domain}  (${current_status})"
+    echo
+    printf "%b%-3s %-24s %-18s %-18s%b
+" "$C_TITLE" "#" "Domain" "Cloudflare" "Google" "$C_RESET"
+    echo "$SUBLINE"
+    for ((i=0; i<${#DOMAINS[@]}; i++)); do
+        domain="${DOMAINS[$i]}"
+        cf_live="${cf_live_ref[$i]:-...}"
+        google_live="${google_live_ref[$i]:-...}"
+        printf "%b%02d%b  %-24.24s %-18s %-18s
+" "$C_DIM" "$((i + 1))" "$C_RESET" "$domain" "$cf_live" "$google_live"
+    done
+    echo
+    echo "Legend   : Nms = success, 0ms = ignored, bad = failed/timeout, ... = pending"
+    echo "Method   : round-robin across domains, ${ITERATIONS} rounds per domain, 0 ms ignored"
 }
 
 choose_profile() {
@@ -647,53 +715,46 @@ print_recommendation() {
 }
 
 test_dns() {
-    local dns label domain output rc qtime status min max avg median p90 score idx round step domain_count start_offset query_done query_total total_bad total_zero
+    local dns label domain output rc qtime status min max avg median p90 score idx round step domain_count
+    local start_offset query_done total_bad total_zero total_queries domain_idx current_status live_value total_rounds
     local bad_count zero_count
-    local -a all_times=() times=() summary_rows=()
+    local -a all_times=() times=() summary_rows=() cf_live_status=() google_live_status=()
     local -A domain_time_map=() domain_bad_map=() domain_zero_map=()
+    local -A cf_avg_map=() cf_median_map=() cf_p90_map=() cf_bad_map=() cf_zero_map=()
+    local -A google_avg_map=() google_median_map=() google_p90_map=() google_bad_map=() google_zero_map=()
     local cf_score="N/A" google_score="N/A"
     local cf_avg="N/A" google_avg="N/A"
     local cf_median="N/A" google_median="N/A"
     local cf_p90="N/A" google_p90="N/A"
     local cf_bad=0 google_bad=0
     local cf_zero=0 google_zero=0
-    local total_rounds=$(( ${#DOMAINS[@]} * ITERATIONS ))
 
     if ! need_test_tools; then
         warn "Test canceled."
         return 1
     fi
 
-    echo "Test DNS"
-    echo "$SUBLINE"
-    echo
-    echo "Targets : 1.1.1.1 vs 8.8.8.8"
-    echo
-    echo "Domains :"
-    print_domain_grid
-    echo
-    echo "Rounds  : $ITERATIONS per domain"
-    echo
-    echo "Method  : round-robin across domains to reduce hot-cache bias"
-    echo
-    echo "Rule    : 0 ms is ignored in stats and recommendation"
-    echo
-
     domain_count=${#DOMAINS[@]}
-    query_total=$(( domain_count * ITERATIONS ))
+    total_rounds=$(( domain_count * ITERATIONS ))
+    total_queries=$(( total_rounds * ${#TEST_DNS[@]} ))
+    query_done=0
+
+    for ((idx=0; idx<domain_count; idx++)); do
+        cf_live_status[idx]="..."
+        google_live_status[idx]="..."
+    done
+
+    test_ui_begin
+    trap 'test_ui_end' RETURN
+    draw_test_dashboard "Preparing" "waiting" "$query_done" "$total_queries" 0 "pending" cf_live_status google_live_status
 
     for idx in 0 1; do
         dns="${TEST_DNS[$idx]}"
         label="${TEST_LABELS[$idx]}"
-        echo "@$dns  ($label)"
-        echo
-        fmt_header "Domain"
-        echo "$SUBLINE"
 
         all_times=()
         total_bad=0
         total_zero=0
-        query_done=0
 
         for domain in "${DOMAINS[@]}"; do
             domain_time_map["$domain"]=""
@@ -704,14 +765,13 @@ test_dns() {
         for ((round=1; round<=ITERATIONS; round++)); do
             start_offset=$(( (round - 1) % domain_count ))
             for ((step=0; step<domain_count; step++)); do
-                domain="${DOMAINS[$(((start_offset + step) % domain_count))]}"
+                domain_idx=$(((start_offset + step) % domain_count))
+                domain="${DOMAINS[$domain_idx]}"
                 output=""
                 rc=0
+                live_value="bad"
 
-                if output=$(timeout "${OUTER_TIMEOUT}s" dig @"$dns" "$domain" "$QTYPE" \
-                    +tries=1 +time="$DIG_TIMEOUT" \
-                    +noquestion +noanswer +noauthority +noadditional +nostats \
-                    +comments +stats 2>/dev/null); then
+                if output=$(timeout "${OUTER_TIMEOUT}s" dig @"$dns" "$domain" "$QTYPE"                     +tries=1 +time="$DIG_TIMEOUT"                     +noquestion +noanswer +noauthority +noadditional +nostats                     +comments +stats 2>/dev/null); then
                     rc=0
                 else
                     rc=$?
@@ -725,30 +785,37 @@ test_dns() {
                             if (( qtime > 0 )); then
                                 domain_time_map["$domain"]+="${qtime} "
                                 all_times+=("$qtime")
+                                live_value="r$(printf '%02d' "$round") ${qtime}ms"
                             else
                                 domain_zero_map["$domain"]=$(( ${domain_zero_map["$domain"]} + 1 ))
                                 total_zero=$(( total_zero + 1 ))
+                                live_value="r$(printf '%02d' "$round") 0ms"
                             fi
                         else
                             domain_bad_map["$domain"]=$(( ${domain_bad_map["$domain"]} + 1 ))
                             total_bad=$(( total_bad + 1 ))
+                            live_value="r$(printf '%02d' "$round") bad"
                         fi
                         ;;
                     *)
                         domain_bad_map["$domain"]=$(( ${domain_bad_map["$domain"]} + 1 ))
                         total_bad=$(( total_bad + 1 ))
+                        live_value="r$(printf '%02d' "$round") bad"
                         ;;
                 esac
 
+                if [[ "$label" == "Cloudflare" ]]; then
+                    cf_live_status[$domain_idx]="$live_value"
+                else
+                    google_live_status[$domain_idx]="$live_value"
+                fi
+
                 query_done=$((query_done + 1))
-                printf "
-${C_DIM}  Progress : %3d/%3d  (round %02d/%02d)${C_RESET}" "$query_done" "$query_total" "$round" "$ITERATIONS" >&2
+                current_status="$live_value"
+                draw_test_dashboard "$label" "$domain" "$query_done" "$total_queries" "$round" "$current_status" cf_live_status google_live_status
                 sleep 0.03
             done
         done
-        printf "
-%*s
-" 72 "" >&2
 
         for domain in "${DOMAINS[@]}"; do
             times=()
@@ -761,9 +828,24 @@ ${C_DIM}  Progress : %3d/%3d  (round %02d/%02d)${C_RESET}" "$query_done" "$query
 
             if [[ ${#times[@]} -gt 0 ]]; then
                 read -r min max avg median p90 <<< "$(calc_stats "${times[@]}")"
-                fmt_row "$domain" "$min" "$max" "$avg" "$median" "$p90" "$bad_count" "$zero_count"
             else
-                fmt_row "$domain" "N/A" "N/A" "N/A" "N/A" "N/A" "$bad_count" "$zero_count"
+                avg="N/A"
+                median="N/A"
+                p90="N/A"
+            fi
+
+            if [[ "$label" == "Cloudflare" ]]; then
+                cf_avg_map["$domain"]="$avg"
+                cf_median_map["$domain"]="$median"
+                cf_p90_map["$domain"]="$p90"
+                cf_bad_map["$domain"]="$bad_count"
+                cf_zero_map["$domain"]="$zero_count"
+            else
+                google_avg_map["$domain"]="$avg"
+                google_median_map["$domain"]="$median"
+                google_p90_map["$domain"]="$p90"
+                google_bad_map["$domain"]="$bad_count"
+                google_zero_map["$domain"]="$zero_count"
             fi
         done
 
@@ -771,16 +853,13 @@ ${C_DIM}  Progress : %3d/%3d  (round %02d/%02d)${C_RESET}" "$query_done" "$query
             read -r min max avg median p90 <<< "$(calc_stats "${all_times[@]}")"
             score=$(calc_score "$avg" "$median" "$p90" "$total_bad" "$total_rounds")
             summary_rows+=("$score|$score|$label|$dns|$avg|$median|$p90|$total_bad|$total_zero")
-            fmt_row "TOTAL" "$min" "$max" "$avg" "$median" "$p90" "$total_bad" "$total_zero" "$C_OK"
         else
+            avg="N/A"
+            median="N/A"
+            p90="N/A"
             score="N/A"
             summary_rows+=("999999|N/A|$label|$dns|N/A|N/A|N/A|$total_bad|$total_zero")
-            fmt_row "TOTAL" "N/A" "N/A" "N/A" "N/A" "N/A" "$total_bad" "$total_zero" "$C_OK"
         fi
-
-        echo
-        echo "Ignored  : zero ms = $total_zero"
-        echo
 
         if [[ "$label" == "Cloudflare" ]]; then
             cf_score="$score"; cf_avg="$avg"; cf_median="$median"; cf_p90="$p90"; cf_bad="$total_bad"; cf_zero="$total_zero"
@@ -789,6 +868,20 @@ ${C_DIM}  Progress : %3d/%3d  (round %02d/%02d)${C_RESET}" "$query_done" "$query
         fi
     done
 
+    if [[ -t 1 ]]; then
+        printf '[H[2J'
+    fi
+
+    echo "Compare report"
+    echo "$SUBLINE"
+    echo
+    fmt_compare_header
+    echo "$SUBLINE"
+    for domain in "${DOMAINS[@]}"; do
+        fmt_compare_row             "$domain"             "${cf_median_map["$domain"]:-N/A}"             "${cf_p90_map["$domain"]:-N/A}"             "${cf_bad_map["$domain"]:-0}"             "${cf_zero_map["$domain"]:-0}"             "${google_median_map["$domain"]:-N/A}"             "${google_p90_map["$domain"]:-N/A}"             "${google_bad_map["$domain"]:-0}"             "${google_zero_map["$domain"]:-0}"
+    done
+
+    echo
     echo "Summary"
     echo "$SUBLINE"
     echo
@@ -799,14 +892,7 @@ ${C_DIM}  Progress : %3d/%3d  (round %02d/%02d)${C_RESET}" "$query_done" "$query
         fmt_summary_row "${label} @${dns}" "$avg" "$median" "$p90" "$bad" "$zero" "$score_display"
     done
 
-    print_recommendation \
-        "$cf_score" "$google_score" \
-        "$cf_avg" "$google_avg" \
-        "$cf_median" "$google_median" \
-        "$cf_p90" "$google_p90" \
-        "$cf_bad" "$google_bad" \
-        "$cf_zero" "$google_zero" \
-        "$total_rounds"
+    print_recommendation         "$cf_score" "$google_score"         "$cf_avg" "$google_avg"         "$cf_median" "$google_median"         "$cf_p90" "$google_p90"         "$cf_bad" "$google_bad"         "$cf_zero" "$google_zero"         "$total_rounds"
 }
 
 show_status() {
