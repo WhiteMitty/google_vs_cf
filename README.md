@@ -36,3 +36,13 @@ wget -qO google_vs_cf.sh https://raw.githubusercontent.com/WhiteMitty/google_vs_
 - Run as `root`
 - Designed for Debian/Ubuntu style systems
 - `0 ms` results are ignored in stats and recommendation
+
+<h2 align="left">DNS Test</h2>
+<p align="left">
+  <img src="dns_test.jpg" alt="DNS Test" width="900">
+</p>
+
+<h2 align="left">DNS Report</h2>
+<p align="left">
+  <img src="dns_report" alt="DNS Report" width="900">
+</p>
