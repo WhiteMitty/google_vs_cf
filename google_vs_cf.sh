@@ -693,11 +693,11 @@ print_recommendation() {
     loser_ratio=$(calc_bad_ratio "$loser_bad" "$total_rounds")
 
     if awk -v d="$diff" 'BEGIN { exit !(d < 0.80) }'; then
-        level="${YELLOW}Slight edge${NC}"
+        level="Slight edge"
     elif awk -v d="$diff" 'BEGIN { exit !(d < 2.20) }'; then
-        level="${YELLOW}Recommended${NC}"
+        level="Recommended"
     else
-        level="${YELLOW}Strongly recommended${NC}"
+        level="Strongly recommended"
     fi
 
     ok "$level: $winner"
