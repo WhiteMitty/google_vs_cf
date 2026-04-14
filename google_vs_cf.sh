@@ -697,7 +697,7 @@ print_recommendation() {
     elif awk -v d="$diff" 'BEGIN { exit !(d < 2.20) }'; then
         level="Recommended"
     else
-        level="Strongly recommended"
+        level="${YELLOW}Strongly recommended${NC}"
     fi
 
     ok "$level: $winner"
@@ -869,7 +869,7 @@ test_dns() {
     done
 
     if [[ -t 1 ]]; then
-        printf '[H[2J'
+        printf '\e[H\e[2J'
     fi
 
     echo "Compare report"
