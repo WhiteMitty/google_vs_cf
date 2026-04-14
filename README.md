@@ -13,13 +13,13 @@ A small Bash tool to:
 ### curl
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/WhiteMitty/google_vs_cf/main/google_vs_cf.sh | bash
+bash <(curl -fsSL https://raw.githubusercontent.com/WhiteMitty/google_vs_cf/main/google_vs_cf.sh)
 ```
 
 ### wget
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/WhiteMitty/google_vs_cf/main/google_vs_cf.sh | bash
+bash <(wget -qO- https://raw.githubusercontent.com/WhiteMitty/google_vs_cf/main/google_vs_cf.sh)
 ```
 
 ## Menu
