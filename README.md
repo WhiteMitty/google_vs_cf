@@ -44,5 +44,5 @@ wget -qO google_vs_cf.sh https://raw.githubusercontent.com/WhiteMitty/google_vs_
 
 <h2 align="left">DNS Report</h2>
 <p align="left">
-  <img src="dns_report" alt="DNS Report" width="900">
+  <img src="dns_report.jpg" alt="DNS Report" width="900">
 </p>
