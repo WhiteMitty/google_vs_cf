@@ -54,15 +54,37 @@ info() { echo "${C_INFO}$*${C_RESET}"; }
 print_menu_item() {
     local key="$1"
     local title="$2"
-    local desc="$3"
-    printf " %b%s%b) %-18s %s\n" "$C_INFO" "$key" "$C_RESET" "$title" "$desc"
+    printf " %b%s%b) %s
+" "$C_INFO" "$key" "$C_RESET" "$title"
 }
 
 print_profile_item() {
     local key="$1"
     local title="$2"
     local path="$3"
-    printf " %b%s%b) %-14s %s\n" "$C_INFO" "$key" "$C_RESET" "$title" "$path"
+    printf " %b%s%b) %-14s %s
+" "$C_INFO" "$key" "$C_RESET" "$title" "$path"
+}
+
+center_text() {
+    local text="$1"
+    local color="${2:-}"
+    local width=${#LINE}
+    local len=${#text}
+    local pad=0
+    if (( width > len )); then
+        pad=$(( (width - len) / 2 ))
+    fi
+    printf "%*s%b%s%b
+" "$pad" "" "$color" "$text" "$C_RESET"
+}
+
+current_dns_servers() {
+    if [[ ! -e /etc/resolv.conf ]]; then
+        echo "无"
+        return 0
+    fi
+    awk '$1 == "nameserver" { if (out) out = out " / " $2; else out = $2 } END { if (out) print out; else print "未发现 nameserver" }' /etc/resolv.conf 2>/dev/null || echo "读取失败"
 }
 
 print_domain_grid() {
@@ -203,11 +225,13 @@ color_resolved() {
 
 print_header() {
     echo "$LINE"
-    echo "${C_TITLE}${APP_NAME}${C_RESET}  v ${VERSION}  |  Designed by ${AUTHOR}"
+    center_text "$APP_NAME" "$C_TITLE"
+    center_text "v ${VERSION}  |  Designed by ${AUTHOR}" "$C_DIM"
     echo "$LINE"
     echo
     echo "模式     : $(color_mode)"
     echo "resolved : $(color_resolved)"
+    echo "当前 DNS : $(current_dns_servers)"
     echo
 }
 
@@ -468,16 +492,11 @@ choose_profile() {
     while true; do
         echo "DNS 方案"
         echo "$SUBLINE"
-        echo
         print_profile_item "1" "CF Dual"      "1.1.1.1  ->  1.0.0.1"
-        echo
         print_profile_item "2" "Google Dual"  "8.8.8.8  ->  8.8.4.4"
-        echo
         print_profile_item "3" "CF First"     "1.1.1.1  ->  8.8.8.8"
-        echo
         print_profile_item "4" "Google First" "8.8.8.8  ->  1.1.1.1"
-        echo
-        print_profile_item "0" "返回"         "返回主菜单"
+        print_profile_item "0" "返回"         ""
         echo
         if ! read -r -p "请选择 [0-4]: " choice; then
             echo
@@ -704,18 +723,13 @@ resolved_related_detected() {
 
 apply_with_resolved_prompt() {
     while true; do
-        echo "检测到 systemd-resolved 或 resolved 方案。"
+        echo "检测到 systemd-resolved / resolved 方案"
         echo "$SUBLINE"
-        echo
-        print_menu_item "1" "保留 resolved" "通过 drop-in 写入 DNS，兼容 resolved 接管方式"
-        echo
-        print_menu_item "2" "停用 resolved" "停止并禁用 systemd-resolved，然后直接写 /etc/resolv.conf"
-        echo
-        print_menu_item "3" "卸载 resolved" "卸载 systemd-resolved，然后直接写 /etc/resolv.conf"
-        echo
-        print_menu_item "4" "仅直接写入" "不处理 resolved，直接写 /etc/resolv.conf，可能被覆盖"
-        echo
-        print_menu_item "0" "取消" "不改变系统 DNS"
+        print_menu_item "1" "保留 resolved"
+        print_menu_item "2" "停用 resolved"
+        print_menu_item "3" "卸载 resolved"
+        print_menu_item "4" "仅直接写入"
+        print_menu_item "0" "取消"
         echo
         if ! read -r -p "请选择 [0-4]: " choice; then
             echo
@@ -860,7 +874,7 @@ print_recommendation() {
         level="强烈推荐"
     fi
 
-    ok "$level：$winner"
+    ok "${level}：${winner}"
     echo "原因   : 优先比较失败率，其次比较 median、p90、average。"
     echo "Score  : $winner $winner_score  vs  $loser $loser_score"
     echo "Winner : bad $winner_bad/$total_rounds ($winner_ratio), median $winner_median ms, p90 $winner_p90 ms, avg $winner_avg ms"
@@ -1073,95 +1087,6 @@ test_dns() {
         "$total_rounds"
 }
 
-show_status() {
-    local package_text mode_text enabled_text active_text target
-    echo "当前状态"
-    echo "$SUBLINE"
-    echo
-
-    mode_text="$(resolv_mode_raw)"
-    echo -n "模式     : "
-    case "$mode_text" in
-        "plain file") ok "$(mode_cn "$mode_text")" ;;
-        "resolved link") info "$(mode_cn "$mode_text")" ;;
-        "locked file") warn "$(mode_cn "$mode_text")" ;;
-        *) warn "$(mode_cn "$mode_text")" ;;
-    esac
-
-    echo
-    echo "resolv.conf"
-    if [[ -L /etc/resolv.conf ]]; then
-        echo "type     : symlink"
-        target="$(readlink -f /etc/resolv.conf 2>/dev/null || readlink /etc/resolv.conf 2>/dev/null || true)"
-        echo "target   : $target"
-    elif [[ -f /etc/resolv.conf ]]; then
-        echo "type     : file"
-    else
-        echo "type     : missing"
-    fi
-
-    echo
-    echo -n "old lock : "
-    if command_exists lsattr; then
-        if is_locked; then
-            warn "yes"
-        else
-            ok "no"
-        fi
-    else
-        warn "unknown (lsattr missing)"
-    fi
-
-    echo
-    echo "content"
-    if [[ -e /etc/resolv.conf ]]; then
-        cat /etc/resolv.conf 2>/dev/null || true
-    else
-        echo "missing"
-    fi
-
-    echo
-    echo "systemd-resolved"
-    package_text="$(if pkg_installed systemd-resolved; then echo installed; else echo not installed; fi)"
-    echo -n "package  : "
-    if [[ "$package_text" == "installed" ]]; then ok "$package_text"; else info "$package_text"; fi
-
-    if pkg_installed systemd-resolved; then
-        enabled_text="$(enabled_state systemd-resolved)"
-        active_text="$(service_state systemd-resolved)"
-        echo -n "enabled  : "
-        case "$enabled_text" in
-            enabled) ok "$enabled_text" ;;
-            masked) warn "$enabled_text" ;;
-            *) warn "$enabled_text" ;;
-        esac
-        echo -n "active   : "
-        case "$active_text" in
-            active) ok "$active_text" ;;
-            inactive|failed) warn "$active_text" ;;
-            *) warn "$active_text" ;;
-        esac
-    fi
-
-    echo
-    echo "本脚本 resolved drop-in"
-    if [[ -f "$RESOLVED_DROPIN_FILE" ]]; then
-        cat "$RESOLVED_DROPIN_FILE"
-    else
-        echo "none"
-    fi
-
-    echo
-    echo "旧版 DoH"
-    if legacy_dns_exists; then
-        warn "detected"
-        [[ -f "$LEGACY_DOH_SERVICE" ]] && echo "service : $LEGACY_DOH_SERVICE"
-        [[ -d "$LEGACY_DOH_DIR" ]] && echo "dir     : $LEGACY_DOH_DIR"
-    else
-        echo "none"
-    fi
-}
-
 cleanup_script_configs() {
     echo "清理本脚本配置"
     echo "$SUBLINE"
@@ -1188,17 +1113,12 @@ main_menu() {
     while true; do
         clear_screen
         print_header
-        print_menu_item "1" "DNS 测速对比" "Cloudflare vs Google，表格部分保留英文"
+        print_menu_item "1" "DNS 测速"
+        print_menu_item "2" "应用 DNS"
+        print_menu_item "3" "清理配置"
+        print_menu_item "0" "退出"
         echo
-        print_menu_item "2" "应用 DNS 方案" "选择 CF / Google，并写入系统 DNS"
-        echo
-        print_menu_item "3" "查看当前状态" "查看 resolv.conf、resolved、旧版 DoH"
-        echo
-        print_menu_item "4" "清理脚本配置" "删除本脚本 drop-in 与旧版 DoH 文件"
-        echo
-        print_menu_item "0" "退出" "不做任何修改"
-        echo
-        if ! read -r -p "请选择 [0-4]: " action; then
+        if ! read -r -p "请选择 [0-3]: " action; then
             clear_screen
             return 0
         fi
@@ -1216,10 +1136,6 @@ main_menu() {
                 pause
                 ;;
             3)
-                show_status
-                pause
-                ;;
-            4)
                 cleanup_script_configs || true
                 pause
                 ;;
