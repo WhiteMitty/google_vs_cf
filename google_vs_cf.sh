@@ -11,10 +11,11 @@ TEST_LABELS=("Cloudflare" "Google")
 DOMAINS=(
     "x.com"          "bbc.com"        "twitch.tv"        "intel.com"
     "apple.com"      "amazon.com"     "fastly.com"       "akamai.com"
-    "google.com"     "tiktok.com"     "github.com"       "youtube.com"      
+    "google.com"     "tiktok.com"     "github.com"       "youtube.com"
     "netflix.com"    "telegram.org"   "wikipedia.org"    "microsoft.com"
-    "instagram.com"  "aws.amazon.com" "disneyplus.com"   "steampowered.com"                      
+    "instagram.com"  "aws.amazon.com" "disneyplus.com"   "steampowered.com"
 )
+
 ITERATIONS=20
 DIG_TIMEOUT=2
 OUTER_TIMEOUT=$((DIG_TIMEOUT + 1))
@@ -54,7 +55,7 @@ print_menu_item() {
     local key="$1"
     local title="$2"
     local desc="$3"
-    printf " %b%s%b) %-24s %s\n" "$C_INFO" "$key" "$C_RESET" "$title" "$desc"
+    printf " %b%s%b) %-18s %s\n" "$C_INFO" "$key" "$C_RESET" "$title" "$desc"
 }
 
 print_profile_item() {
@@ -72,7 +73,9 @@ print_domain_grid() {
         for ((j=0; j<cols; j++)); do
             idx=$((i + j))
             if (( idx < ${#DOMAINS[@]} )); then
-                printf "  %b%02d%b) %b%-*s%b"                     "$C_DIM" "$((idx + 1))" "$C_RESET"                     "$C_INFO" "$width" "${DOMAINS[$idx]}" "$C_RESET"
+                printf "  %b%02d%b) %b%-*s%b" \
+                    "$C_DIM" "$((idx + 1))" "$C_RESET" \
+                    "$C_INFO" "$width" "${DOMAINS[$idx]}" "$C_RESET"
             fi
         done
         printf "\n"
@@ -81,14 +84,14 @@ print_domain_grid() {
 
 need_root() {
     if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-        err "Please run this script as root."
+        err "请使用 root 权限运行此脚本。"
         exit 1
     fi
 }
 
 pause() {
     echo
-    if ! read -r -p "Press Enter to return..." _dummy; then
+    if ! read -r -p "按 Enter 返回..." _dummy; then
         echo
     fi
 }
@@ -98,6 +101,7 @@ clear_screen() {
 }
 
 pkg_installed() {
+    command -v dpkg-query >/dev/null 2>&1 || return 1
     dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
 }
 
@@ -139,7 +143,13 @@ is_locked() {
 
 resolv_mode_raw() {
     if [[ -L /etc/resolv.conf ]]; then
-        echo "resolved link"
+        local target
+        target="$(readlink -f /etc/resolv.conf 2>/dev/null || readlink /etc/resolv.conf 2>/dev/null || true)"
+        if [[ "$target" == /run/systemd/resolve/* || "$target" == /usr/lib/systemd/* || "$target" == /lib/systemd/* ]]; then
+            echo "resolved link"
+        else
+            echo "symlink"
+        fi
     elif [[ -f /etc/resolv.conf ]]; then
         if is_locked; then
             echo "locked file"
@@ -151,14 +161,26 @@ resolv_mode_raw() {
     fi
 }
 
+mode_cn() {
+    case "$1" in
+        "resolved link") echo "resolved 接管" ;;
+        "symlink") echo "符号链接" ;;
+        "locked file") echo "普通文件（旧锁定）" ;;
+        "plain file") echo "普通文件" ;;
+        "missing") echo "缺失" ;;
+        *) echo "$1" ;;
+    esac
+}
+
 color_mode() {
-    local mode
+    local mode text
     mode="$(resolv_mode_raw)"
+    text="$(mode_cn "$mode")"
     case "$mode" in
-        "locked file") printf "%s%s%s" "$C_OK" "$mode" "$C_RESET" ;;
-        "resolved link") printf "%s%s%s" "$C_INFO" "$mode" "$C_RESET" ;;
-        "plain file") printf "%s%s%s" "$C_WARN" "$mode" "$C_RESET" ;;
-        *) printf "%s%s%s" "$C_ERR" "$mode" "$C_RESET" ;;
+        "plain file") printf "%s%s%s" "$C_OK" "$text" "$C_RESET" ;;
+        "resolved link") printf "%s%s%s" "$C_INFO" "$text" "$C_RESET" ;;
+        "locked file") printf "%s%s%s" "$C_WARN" "$text" "$C_RESET" ;;
+        *) printf "%s%s%s" "$C_WARN" "$text" "$C_RESET" ;;
     esac
 }
 
@@ -168,16 +190,14 @@ color_resolved() {
     IFS='|' read -r package enabled active <<< "$raw"
 
     if [[ "$package" != "installed" ]]; then
-        printf "%snot installed%s" "$C_ERR" "$C_RESET"
+        printf "%s未安装%s" "$C_DIM" "$C_RESET"
         return 0
     fi
 
     if [[ "$active" == "active" ]]; then
-        printf "%sinstalled / %s / %s%s" "$C_OK" "$enabled" "$active" "$C_RESET"
-    elif [[ "$enabled" == "masked" ]]; then
-        printf "%sinstalled / masked / %s%s" "$C_WARN" "$active" "$C_RESET"
+        printf "%s已安装 / %s / %s%s" "$C_OK" "$enabled" "$active" "$C_RESET"
     else
-        printf "%sinstalled / %s / %s%s" "$C_WARN" "$enabled" "$active" "$C_RESET"
+        printf "%s已安装 / %s / %s%s" "$C_WARN" "$enabled" "$active" "$C_RESET"
     fi
 }
 
@@ -186,14 +206,17 @@ print_header() {
     echo "${C_TITLE}${APP_NAME}${C_RESET}  v ${VERSION}  |  Designed by ${AUTHOR}"
     echo "$LINE"
     echo
-    echo "Mode     : $(color_mode)"
-    echo
-    echo "Resolved : $(color_resolved)"
+    echo "模式     : $(color_mode)"
+    echo "resolved : $(color_resolved)"
     echo
 }
 
 pkg_install() {
     local -a pkgs=("$@")
+    if ! command_exists apt-get; then
+        err "未找到 apt-get，当前脚本主要面向 Debian / Ubuntu。"
+        return 1
+    fi
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     apt-get install -y "${pkgs[@]}"
@@ -208,8 +231,8 @@ prompt_install_missing() {
     fi
 
     echo
-    warn "Missing packages: ${missing[*]}"
-    if ! read -r -p "Install now? [y/N]: " answer; then
+    warn "缺少依赖：${missing[*]}"
+    if ! read -r -p "现在安装？[y/N]: " answer; then
         echo
         return 1
     fi
@@ -236,11 +259,10 @@ need_test_tools() {
     prompt_install_missing "${missing[@]}"
 }
 
-need_lock_tools() {
-    local -a missing=()
-    command_exists chattr || missing+=(e2fsprogs)
-    command_exists lsattr || missing+=(e2fsprogs)
-    prompt_install_missing "${missing[@]}"
+need_unlock_tool_if_locked() {
+    if is_locked && ! command_exists chattr; then
+        prompt_install_missing e2fsprogs
+    fi
 }
 
 calc_stats() {
@@ -248,8 +270,7 @@ calc_stats() {
         echo "N/A N/A N/A N/A N/A"
         return 0
     fi
-    printf "%s
-" "$@" | sort -n | awk '
+    printf "%s\n" "$@" | sort -n | awk '
     { arr[++count]=$1; sum+=$1 }
     END {
         if (!count) { printf "N/A N/A N/A N/A N/A"; exit }
@@ -338,8 +359,7 @@ dns_a_is_better() {
 }
 
 fmt_header() {
-    printf "%b%-20s%b | %-5s | %-5s | %-7s | %-7s | %-7s | %-4s | %-4s
-" \
+    printf "%b%-20s%b | %-5s | %-5s | %-7s | %-7s | %-7s | %-4s | %-4s\n" \
         "$C_TITLE" "$1" "$C_RESET" "Min" "Max" "Avg" "Median" "P90" "Bad" "0ms"
 }
 
@@ -354,14 +374,12 @@ fmt_row() {
     local zero="$8"
     local color="${9:-$C_INFO}"
 
-    printf "%b%-20s%b | %-5s | %-5s | %-7s | %-7s | %-7s | %-4s | %-4s
-" \
+    printf "%b%-20s%b | %-5s | %-5s | %-7s | %-7s | %-7s | %-4s | %-4s\n" \
         "$color" "$label" "$C_RESET" "$min" "$max" "$avg" "$median" "$p90" "$bad" "$zero"
 }
 
 fmt_summary_header() {
-    printf "%b%-22s%b | %-7s | %-7s | %-7s | %-4s | %-4s | %-6s
-" \
+    printf "%b%-22s%b | %-7s | %-7s | %-7s | %-4s | %-4s | %-6s\n" \
         "$C_TITLE" "Resolver" "$C_RESET" "Avg" "Median" "P90" "Bad" "0ms" "Score"
 }
 
@@ -375,13 +393,13 @@ fmt_summary_row() {
     local score="$7"
     local color="${8:-$C_INFO}"
 
-    printf "%b%-22s%b | %-7s | %-7s | %-7s | %-4s | %-4s | %-6s
-"         "$color" "$label" "$C_RESET" "$avg" "$median" "$p90" "$bad" "$zero" "$score"
+    printf "%b%-22s%b | %-7s | %-7s | %-7s | %-4s | %-4s | %-6s\n" \
+        "$color" "$label" "$C_RESET" "$avg" "$median" "$p90" "$bad" "$zero" "$score"
 }
 
 fmt_compare_header() {
-    printf "%b%-20s%b | %-6s | %-6s | %-4s | %-4s || %-6s | %-6s | %-4s | %-4s
-"         "$C_TITLE" "Domain" "$C_RESET" "CF Med" "CF P90" "Bad" "0ms" "GG Med" "GG P90" "Bad" "0ms"
+    printf "%b%-20s%b | %-6s | %-6s | %-4s | %-4s || %-6s | %-6s | %-4s | %-4s\n" \
+        "$C_TITLE" "Domain" "$C_RESET" "CF Med" "CF P90" "Bad" "0ms" "GG Med" "GG P90" "Bad" "0ms"
 }
 
 fmt_compare_row() {
@@ -395,19 +413,19 @@ fmt_compare_row() {
     local google_bad="$8"
     local google_zero="$9"
 
-    printf "%-20s | %-6s | %-6s | %-4s | %-4s || %-6s | %-6s | %-4s | %-4s
-"         "$domain" "$cf_median" "$cf_p90" "$cf_bad" "$cf_zero" "$google_median" "$google_p90" "$google_bad" "$google_zero"
+    printf "%-20s | %-6s | %-6s | %-4s | %-4s || %-6s | %-6s | %-4s | %-4s\n" \
+        "$domain" "$cf_median" "$cf_p90" "$cf_bad" "$cf_zero" "$google_median" "$google_p90" "$google_bad" "$google_zero"
 }
 
 test_ui_begin() {
     if [[ -t 1 ]]; then
-        printf '[?25l'
+        printf '\033[?25l'
     fi
 }
 
 test_ui_end() {
     if [[ -t 1 ]]; then
-        printf '[?25h'
+        printf '\033[?25h'
     fi
 }
 
@@ -424,7 +442,7 @@ draw_test_dashboard() {
 
     [[ -t 1 ]] || return 0
 
-    printf '[H[2J'
+    printf '\033[H\033[2J'
     echo "$LINE"
     echo "${C_TITLE}${APP_NAME}${C_RESET}  v ${VERSION}  |  Live DNS test"
     echo "$LINE"
@@ -433,15 +451,13 @@ draw_test_dashboard() {
     echo "Progress : ${query_done}/${query_total}   |   Round ${current_round}/${ITERATIONS}"
     echo "Current  : ${current_label}  ->  ${current_domain}  (${current_status})"
     echo
-    printf "%b%-3s %-24s %-18s %-18s%b
-" "$C_TITLE" "#" "Domain" "Cloudflare" "Google" "$C_RESET"
+    printf "%b%-3s %-24s %-18s %-18s%b\n" "$C_TITLE" "#" "Domain" "Cloudflare" "Google" "$C_RESET"
     echo "$SUBLINE"
     for ((i=0; i<${#DOMAINS[@]}; i++)); do
         domain="${DOMAINS[$i]}"
         cf_live="${cf_live_ref[$i]:-...}"
         google_live="${google_live_ref[$i]:-...}"
-        printf "%b%02d%b  %-24.24s %-18s %-18s
-" "$C_DIM" "$((i + 1))" "$C_RESET" "$domain" "$cf_live" "$google_live"
+        printf "%b%02d%b  %-24.24s %-18s %-18s\n" "$C_DIM" "$((i + 1))" "$C_RESET" "$domain" "$cf_live" "$google_live"
     done
     echo
     echo "Legend   : Nms = success, 0ms = ignored, bad = failed/timeout, ... = pending"
@@ -450,7 +466,7 @@ draw_test_dashboard() {
 
 choose_profile() {
     while true; do
-        echo "DNS profiles"
+        echo "DNS 方案"
         echo "$SUBLINE"
         echo
         print_profile_item "1" "CF Dual"      "1.1.1.1  ->  1.0.0.1"
@@ -461,9 +477,9 @@ choose_profile() {
         echo
         print_profile_item "4" "Google First" "8.8.8.8  ->  1.1.1.1"
         echo
-        print_profile_item "0" "Back"         "return to main menu"
+        print_profile_item "0" "返回"         "返回主菜单"
         echo
-        if ! read -r -p "Choose [0-4]: " choice; then
+        if ! read -r -p "请选择 [0-4]: " choice; then
             echo
             return 1
         fi
@@ -496,55 +512,88 @@ choose_profile() {
                 return 1
                 ;;
             *)
-                warn "Invalid choice."
+                warn "无效选择。"
                 ;;
         esac
         echo
     done
 }
 
-unlock_resolv() {
-    if [[ -e /etc/resolv.conf ]] && command_exists chattr; then
-        chattr -i /etc/resolv.conf 2>/dev/null || true
-    fi
+legacy_dns_exists() {
+    [[ -f "$LEGACY_DOH_SERVICE" || -d "$LEGACY_DOH_DIR" ]]
 }
 
-cleanup_old_google_vs_cf() {
-    rm -f "$RESOLVED_DROPIN_FILE"
-    rm -f "$LEGACY_DOH_SERVICE"
+cleanup_legacy_doh() {
+    if [[ -f "$LEGACY_DOH_SERVICE" ]]; then
+        systemctl stop google-vs-cf-doh.service 2>/dev/null || true
+        systemctl disable google-vs-cf-doh.service 2>/dev/null || true
+        rm -f "$LEGACY_DOH_SERVICE"
+    fi
     rm -rf "$LEGACY_DOH_DIR"
     systemctl daemon-reload 2>/dev/null || true
 }
 
-neutralize_resolved() {
-    unlock_resolv
-    cleanup_old_google_vs_cf
-
-    systemctl stop systemd-resolved 2>/dev/null || true
-    systemctl disable systemd-resolved 2>/dev/null || true
-    systemctl mask systemd-resolved 2>/dev/null || true
+cleanup_resolved_dropin() {
+    rm -f "$RESOLVED_DROPIN_FILE"
+    systemctl daemon-reload 2>/dev/null || true
 }
 
-apply_locked_file() {
-    if ! need_lock_tools; then
-        warn "Canceled."
-        return 1
+prompt_cleanup_legacy() {
+    if ! legacy_dns_exists; then
+        return 0
     fi
 
-    echo "Force apply + lock"
-    echo "$SUBLINE"
     echo
-    echo "Profile : $PROFILE_NAME"
-    echo
-    echo "DNS     : $DNS1 -> $DNS2"
-    echo
-    read -r -p "Continue? [y/N]: " answer || { echo; warn "Canceled."; return 1; }
+    warn "检测到旧版 google-vs-cf DoH 服务或目录。"
+    if ! read -r -p "是否删除这些旧配置？[y/N]: " answer; then
+        echo
+        return 0
+    fi
     case "$answer" in
-        y|Y) ;;
-        *) warn "Canceled."; return 1 ;;
+        y|Y)
+            cleanup_legacy_doh
+            ok "旧版 DoH 配置已清理。"
+            ;;
+        *)
+            warn "已保留旧版 DoH 配置。"
+            ;;
     esac
+}
 
-    neutralize_resolved
+prompt_unlock_old_resolv_lock() {
+    if ! is_locked; then
+        return 0
+    fi
+
+    echo
+    warn "检测到 /etc/resolv.conf 带有旧的 immutable 锁。新版不会再上锁，但写入前需要先移除旧锁。"
+    if ! read -r -p "是否移除旧锁？[y/N]: " answer; then
+        echo
+        return 1
+    fi
+    case "$answer" in
+        y|Y)
+            if ! need_unlock_tool_if_locked; then
+                warn "缺少 chattr，无法移除旧锁。"
+                return 1
+            fi
+            chattr -i /etc/resolv.conf 2>/dev/null || true
+            if is_locked; then
+                err "旧锁移除失败。"
+                return 1
+            fi
+            ok "旧锁已移除。"
+            ;;
+        *)
+            warn "已取消写入。"
+            return 1
+            ;;
+    esac
+}
+
+write_direct_resolv() {
+    prompt_unlock_old_resolv_lock || return 1
+    cleanup_resolved_dropin
 
     rm -f /etc/resolv.conf
     {
@@ -552,41 +601,26 @@ apply_locked_file() {
         echo "nameserver $DNS2"
         echo "options timeout:2 attempts:2"
     } > /etc/resolv.conf
+    chmod 0644 /etc/resolv.conf 2>/dev/null || true
 
-    if chattr +i /etc/resolv.conf 2>/dev/null; then
-        if is_locked; then
-            ok "Locked file applied."
-        else
-            warn "File written, but immutable lock was not confirmed."
-        fi
-    else
-        warn "File written, but immutable lock failed."
-    fi
+    ok "已写入 /etc/resolv.conf。"
+    warn "未使用 chattr +i，不会给 DNS 文件上锁。"
 }
 
-reinstall_resolved_apply() {
-    echo "Reinstall resolved + apply"
-    echo "$SUBLINE"
-    echo
-    echo "Profile : $PROFILE_NAME"
-    echo
-    echo "DNS     : $DNS1 -> $DNS2"
-    echo
-    read -r -p "Continue? [y/N]: " answer || { echo; warn "Canceled."; return 1; }
-    case "$answer" in
-        y|Y) ;;
-        *) warn "Canceled."; return 1 ;;
-    esac
+configure_resolved_profile() {
+    if ! pkg_installed systemd-resolved; then
+        warn "未安装 systemd-resolved。"
+        if ! read -r -p "是否安装并使用 systemd-resolved？[y/N]: " answer; then
+            echo
+            return 1
+        fi
+        case "$answer" in
+            y|Y) pkg_install systemd-resolved ;;
+            *) warn "已取消。"; return 1 ;;
+        esac
+    fi
 
-    unlock_resolv
-    cleanup_old_google_vs_cf
-
-    systemctl unmask systemd-resolved 2>/dev/null || true
-
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    apt-get install -y systemd-resolved
-
+    prompt_unlock_old_resolv_lock || return 1
     mkdir -p "$RESOLVED_DROPIN_DIR"
     cat > "$RESOLVED_DROPIN_FILE" <<CFG
 [Resolve]
@@ -595,6 +629,7 @@ Domains=~.
 DNSSEC=no
 CFG
 
+    systemctl unmask systemd-resolved 2>/dev/null || true
     systemctl enable systemd-resolved >/dev/null 2>&1 || true
     systemctl restart systemd-resolved
 
@@ -610,10 +645,135 @@ CFG
     elif [[ -e /run/systemd/resolve/resolv.conf ]]; then
         ln -snf /run/systemd/resolve/resolv.conf /etc/resolv.conf
     else
-        warn "resolved is running, but no standard resolv.conf target was found."
+        warn "systemd-resolved 已启动，但未找到标准 resolv.conf 目标。"
     fi
 
-    ok "resolved reinstalled and profile applied."
+    ok "已通过 systemd-resolved 写入 DNS 方案。"
+}
+
+stop_disable_resolved() {
+    systemctl stop systemd-resolved 2>/dev/null || true
+    systemctl disable systemd-resolved 2>/dev/null || true
+    cleanup_resolved_dropin
+}
+
+purge_resolved() {
+    if ! pkg_installed systemd-resolved; then
+        warn "systemd-resolved 未安装，无需卸载。"
+        return 0
+    fi
+
+    echo
+    warn "卸载 systemd-resolved 可能影响 NetworkManager、netplan 或系统默认 DNS 行为。"
+    if ! read -r -p "确认卸载请输入 yes: " answer; then
+        echo
+        return 1
+    fi
+    answer="${answer,,}"
+    if [[ "$answer" != "yes" ]]; then
+        warn "已取消卸载。"
+        return 1
+    fi
+
+    systemctl stop systemd-resolved 2>/dev/null || true
+    systemctl disable systemd-resolved 2>/dev/null || true
+    cleanup_resolved_dropin
+
+    if command_exists apt-get; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get purge -y systemd-resolved
+        apt-get autoremove -y
+        ok "systemd-resolved 已卸载。"
+    else
+        err "未找到 apt-get，无法自动卸载 systemd-resolved。"
+        return 1
+    fi
+}
+
+resolved_related_detected() {
+    local mode raw package enabled active
+    mode="$(resolv_mode_raw)"
+    raw="$(resolved_summary_raw)"
+    IFS='|' read -r package enabled active <<< "$raw"
+
+    [[ "$mode" == "resolved link" ]] && return 0
+    [[ "$package" == "installed" ]] && return 0
+    [[ -f "$RESOLVED_DROPIN_FILE" ]] && return 0
+    return 1
+}
+
+apply_with_resolved_prompt() {
+    while true; do
+        echo "检测到 systemd-resolved 或 resolved 方案。"
+        echo "$SUBLINE"
+        echo
+        print_menu_item "1" "保留 resolved" "通过 drop-in 写入 DNS，兼容 resolved 接管方式"
+        echo
+        print_menu_item "2" "停用 resolved" "停止并禁用 systemd-resolved，然后直接写 /etc/resolv.conf"
+        echo
+        print_menu_item "3" "卸载 resolved" "卸载 systemd-resolved，然后直接写 /etc/resolv.conf"
+        echo
+        print_menu_item "4" "仅直接写入" "不处理 resolved，直接写 /etc/resolv.conf，可能被覆盖"
+        echo
+        print_menu_item "0" "取消" "不改变系统 DNS"
+        echo
+        if ! read -r -p "请选择 [0-4]: " choice; then
+            echo
+            return 1
+        fi
+        echo
+        case "$choice" in
+            1)
+                configure_resolved_profile
+                return $?
+                ;;
+            2)
+                stop_disable_resolved
+                write_direct_resolv
+                return $?
+                ;;
+            3)
+                write_direct_resolv || return 1
+                purge_resolved || return 1
+                write_direct_resolv
+                return $?
+                ;;
+            4)
+                write_direct_resolv
+                return $?
+                ;;
+            0)
+                warn "已取消。"
+                return 1
+                ;;
+            *)
+                warn "无效选择。"
+                ;;
+        esac
+        echo
+    done
+}
+
+apply_dns_profile() {
+    echo "应用 DNS 方案"
+    echo "$SUBLINE"
+    echo
+    echo "方案 : $PROFILE_NAME"
+    echo "DNS  : $DNS1 -> $DNS2"
+    echo
+    read -r -p "继续？[y/N]: " answer || { echo; warn "已取消。"; return 1; }
+    case "$answer" in
+        y|Y) ;;
+        *) warn "已取消。"; return 1 ;;
+    esac
+
+    prompt_cleanup_legacy
+
+    if resolved_related_detected; then
+        apply_with_resolved_prompt
+    else
+        write_direct_resolv
+    fi
 }
 
 print_recommendation() {
@@ -632,22 +792,22 @@ print_recommendation() {
     local total_rounds="${13}"
 
     echo
-    echo "Recommendation"
+    echo "推荐结果"
     echo "$SUBLINE"
     echo
 
     if [[ "$cf_score" == "N/A" && "$google_score" == "N/A" ]]; then
-        warn "No valid result."
+        warn "没有有效结果。"
         return 0
     fi
 
     if [[ "$cf_score" == "N/A" ]]; then
-        ok "Use Google. Cloudflare had no valid score."
+        ok "建议使用 Google。Cloudflare 没有有效评分。"
         return 0
     fi
 
     if [[ "$google_score" == "N/A" ]]; then
-        ok "Use Cloudflare. Google had no valid score."
+        ok "建议使用 Cloudflare。Google 没有有效评分。"
         return 0
     fi
 
@@ -693,25 +853,25 @@ print_recommendation() {
     loser_ratio=$(calc_bad_ratio "$loser_bad" "$total_rounds")
 
     if awk -v d="$diff" 'BEGIN { exit !(d < 0.80) }'; then
-        level="Slight edge"
+        level="轻微优势"
     elif awk -v d="$diff" 'BEGIN { exit !(d < 2.20) }'; then
-        level="Recommended"
+        level="推荐"
     else
-        level="Strongly recommended"
+        level="强烈推荐"
     fi
 
-    ok "$level: $winner"
-    echo "Why     : lower bad ratio first, then lower median, then lower p90, then lower average."
-    echo "Score   : $winner $winner_score  vs  $loser $loser_score"
-    echo "Winner  : bad $winner_bad/$total_rounds ($winner_ratio), median $winner_median ms, p90 $winner_p90 ms, avg $winner_avg ms"
-    echo "Loser   : bad $loser_bad/$total_rounds ($loser_ratio), median $loser_median ms, p90 $loser_p90 ms, avg $loser_avg ms"
+    ok "$level：$winner"
+    echo "原因   : 优先比较失败率，其次比较 median、p90、average。"
+    echo "Score  : $winner $winner_score  vs  $loser $loser_score"
+    echo "Winner : bad $winner_bad/$total_rounds ($winner_ratio), median $winner_median ms, p90 $winner_p90 ms, avg $winner_avg ms"
+    echo "Loser  : bad $loser_bad/$total_rounds ($loser_ratio), median $loser_median ms, p90 $loser_p90 ms, avg $loser_avg ms"
 
     if (( cf_zero > 0 || google_zero > 0 )); then
-        echo "Zero ms : ignored in stats and recommendation."
+        echo "0ms    : 0 ms 已忽略，不参与统计和推荐。"
     fi
 
-    echo "Model   : score = median + 0.35*(p90-median) + 0.10*(avg-median) + 25*bad_ratio"
-    echo "Method  : round-robin sampling across domains, $ITERATIONS rounds per domain."
+    echo "Model  : score = median + 0.35*(p90-median) + 0.10*(avg-median) + 25*bad_ratio"
+    echo "Method : round-robin sampling across domains, $ITERATIONS rounds per domain."
 }
 
 test_dns() {
@@ -730,7 +890,7 @@ test_dns() {
     local cf_zero=0 google_zero=0
 
     if ! need_test_tools; then
-        warn "Test canceled."
+        warn "测速已取消。"
         return 1
     fi
 
@@ -771,7 +931,10 @@ test_dns() {
                 rc=0
                 live_value="bad"
 
-                if output=$(timeout "${OUTER_TIMEOUT}s" dig @"$dns" "$domain" "$QTYPE"                     +tries=1 +time="$DIG_TIMEOUT"                     +noquestion +noanswer +noauthority +noadditional +nostats                     +comments +stats 2>/dev/null); then
+                if output=$(timeout "${OUTER_TIMEOUT}s" dig @"$dns" "$domain" "$QTYPE" \
+                    +tries=1 +time="$DIG_TIMEOUT" \
+                    +noquestion +noanswer +noauthority +noadditional +nostats \
+                    +comments +stats 2>/dev/null); then
                     rc=0
                 else
                     rc=$?
@@ -878,7 +1041,16 @@ test_dns() {
     fmt_compare_header
     echo "$SUBLINE"
     for domain in "${DOMAINS[@]}"; do
-        fmt_compare_row             "$domain"             "${cf_median_map["$domain"]:-N/A}"             "${cf_p90_map["$domain"]:-N/A}"             "${cf_bad_map["$domain"]:-0}"             "${cf_zero_map["$domain"]:-0}"             "${google_median_map["$domain"]:-N/A}"             "${google_p90_map["$domain"]:-N/A}"             "${google_bad_map["$domain"]:-0}"             "${google_zero_map["$domain"]:-0}"
+        fmt_compare_row \
+            "$domain" \
+            "${cf_median_map["$domain"]:-N/A}" \
+            "${cf_p90_map["$domain"]:-N/A}" \
+            "${cf_bad_map["$domain"]:-0}" \
+            "${cf_zero_map["$domain"]:-0}" \
+            "${google_median_map["$domain"]:-N/A}" \
+            "${google_p90_map["$domain"]:-N/A}" \
+            "${google_bad_map["$domain"]:-0}" \
+            "${google_zero_map["$domain"]:-0}"
     done
 
     echo
@@ -887,48 +1059,54 @@ test_dns() {
     echo
     fmt_summary_header
     echo "$SUBLINE"
-    printf "%s
-" "${summary_rows[@]}" | sort -t'|' -k1,1g | while IFS='|' read -r sort_key score_display label dns avg median p90 bad zero; do
+    printf "%s\n" "${summary_rows[@]}" | sort -t'|' -k1,1g | while IFS='|' read -r sort_key score_display label dns avg median p90 bad zero; do
         fmt_summary_row "${label} @${dns}" "$avg" "$median" "$p90" "$bad" "$zero" "$score_display"
     done
 
-    print_recommendation         "$cf_score" "$google_score"         "$cf_avg" "$google_avg"         "$cf_median" "$google_median"         "$cf_p90" "$google_p90"         "$cf_bad" "$google_bad"         "$cf_zero" "$google_zero"         "$total_rounds"
+    print_recommendation \
+        "$cf_score" "$google_score" \
+        "$cf_avg" "$google_avg" \
+        "$cf_median" "$google_median" \
+        "$cf_p90" "$google_p90" \
+        "$cf_bad" "$google_bad" \
+        "$cf_zero" "$google_zero" \
+        "$total_rounds"
 }
 
 show_status() {
-    local package_text mode_text enabled_text active_text
-    echo "Status"
+    local package_text mode_text enabled_text active_text target
+    echo "当前状态"
     echo "$SUBLINE"
     echo
 
     mode_text="$(resolv_mode_raw)"
-    echo -n "Mode    : "
+    echo -n "模式     : "
     case "$mode_text" in
-        "locked file") ok "$mode_text" ;;
-        "resolved link") info "$mode_text" ;;
-        "plain file") warn "$mode_text" ;;
-        *) err "$mode_text" ;;
+        "plain file") ok "$(mode_cn "$mode_text")" ;;
+        "resolved link") info "$(mode_cn "$mode_text")" ;;
+        "locked file") warn "$(mode_cn "$mode_text")" ;;
+        *) warn "$(mode_cn "$mode_text")" ;;
     esac
 
     echo
     echo "resolv.conf"
     if [[ -L /etc/resolv.conf ]]; then
-        echo "type   : symlink"
-        echo
-        echo "target : $(readlink -f /etc/resolv.conf 2>/dev/null || readlink /etc/resolv.conf 2>/dev/null || true)"
+        echo "type     : symlink"
+        target="$(readlink -f /etc/resolv.conf 2>/dev/null || readlink /etc/resolv.conf 2>/dev/null || true)"
+        echo "target   : $target"
     elif [[ -f /etc/resolv.conf ]]; then
-        echo "type   : file"
+        echo "type     : file"
     else
-        echo "type   : missing"
+        echo "type     : missing"
     fi
 
     echo
-    echo -n "lock   : "
+    echo -n "old lock : "
     if command_exists lsattr; then
         if is_locked; then
-            ok "yes"
+            warn "yes"
         else
-            warn "no"
+            ok "no"
         fi
     else
         warn "unknown (lsattr missing)"
@@ -943,23 +1121,21 @@ show_status() {
     fi
 
     echo
-    echo "resolved"
+    echo "systemd-resolved"
     package_text="$(if pkg_installed systemd-resolved; then echo installed; else echo not installed; fi)"
-    echo -n "package : "
-    if [[ "$package_text" == "installed" ]]; then ok "$package_text"; else err "$package_text"; fi
+    echo -n "package  : "
+    if [[ "$package_text" == "installed" ]]; then ok "$package_text"; else info "$package_text"; fi
 
     if pkg_installed systemd-resolved; then
         enabled_text="$(enabled_state systemd-resolved)"
         active_text="$(service_state systemd-resolved)"
-        echo
-        echo -n "enabled : "
+        echo -n "enabled  : "
         case "$enabled_text" in
             enabled) ok "$enabled_text" ;;
             masked) warn "$enabled_text" ;;
             *) warn "$enabled_text" ;;
         esac
-        echo
-        echo -n "active  : "
+        echo -n "active   : "
         case "$active_text" in
             active) ok "$active_text" ;;
             inactive|failed) warn "$active_text" ;;
@@ -968,44 +1144,61 @@ show_status() {
     fi
 
     echo
-    echo "profile"
+    echo "本脚本 resolved drop-in"
     if [[ -f "$RESOLVED_DROPIN_FILE" ]]; then
         cat "$RESOLVED_DROPIN_FILE"
     else
         echo "none"
     fi
+
+    echo
+    echo "旧版 DoH"
+    if legacy_dns_exists; then
+        warn "detected"
+        [[ -f "$LEGACY_DOH_SERVICE" ]] && echo "service : $LEGACY_DOH_SERVICE"
+        [[ -d "$LEGACY_DOH_DIR" ]] && echo "dir     : $LEGACY_DOH_DIR"
+    else
+        echo "none"
+    fi
 }
 
-unlock_only() {
-    if ! need_lock_tools; then
-        warn "Canceled."
+cleanup_script_configs() {
+    echo "清理本脚本配置"
+    echo "$SUBLINE"
+    echo
+    warn "只删除 google_vs_cf 写入的 drop-in 和旧版 DoH 文件，不卸载系统 DNS 服务。"
+    if ! read -r -p "继续？[y/N]: " answer; then
+        echo
         return 1
     fi
-    unlock_resolv
-    if is_locked; then
-        warn "Unlock failed."
-    else
-        ok "Unlocked."
+    case "$answer" in
+        y|Y) ;;
+        *) warn "已取消。"; return 1 ;;
+    esac
+
+    cleanup_resolved_dropin
+    cleanup_legacy_doh
+    if pkg_installed systemd-resolved && [[ "$(service_state systemd-resolved)" == "active" ]]; then
+        systemctl restart systemd-resolved 2>/dev/null || true
     fi
+    ok "清理完成。"
 }
 
 main_menu() {
     while true; do
         clear_screen
         print_header
-        print_menu_item "1" "Test DNS"                 "compare Cloudflare vs Google with round-robin sampling"
+        print_menu_item "1" "DNS 测速对比" "Cloudflare vs Google，表格部分保留英文"
         echo
-        print_menu_item "2" "Force apply + lock"       "write resolv.conf directly and try immutable lock"
+        print_menu_item "2" "应用 DNS 方案" "选择 CF / Google，并写入系统 DNS"
         echo
-        print_menu_item "3" "Reinstall resolved"       "reinstall systemd-resolved and apply selected profile"
+        print_menu_item "3" "查看当前状态" "查看 resolv.conf、resolved、旧版 DoH"
         echo
-        print_menu_item "4" "Unlock only"              "remove immutable bit from /etc/resolv.conf"
+        print_menu_item "4" "清理脚本配置" "删除本脚本 drop-in 与旧版 DoH 文件"
         echo
-        print_menu_item "5" "Show status"              "inspect current mode, lock state, and active profile"
+        print_menu_item "0" "退出" "不做任何修改"
         echo
-        print_menu_item "0" "Exit"                     "leave without changing anything"
-        echo
-        if ! read -r -p "Choose [0-5]: " action; then
+        if ! read -r -p "请选择 [0-4]: " action; then
             clear_screen
             return 0
         fi
@@ -1018,22 +1211,16 @@ main_menu() {
                 ;;
             2)
                 if choose_profile; then
-                    apply_locked_file || true
+                    apply_dns_profile || true
                 fi
                 pause
                 ;;
             3)
-                if choose_profile; then
-                    reinstall_resolved_apply || true
-                fi
+                show_status
                 pause
                 ;;
             4)
-                unlock_only || true
-                pause
-                ;;
-            5)
-                show_status
+                cleanup_script_configs || true
                 pause
                 ;;
             0)
@@ -1041,25 +1228,12 @@ main_menu() {
                 return 0
                 ;;
             *)
-                warn "Invalid choice."
+                warn "无效选择。"
                 pause
                 ;;
         esac
     done
 }
-
-SELF_PATH=""
-if [[ "${BASH_SOURCE[0]:-}" == "$0" && -f "$0" ]]; then
-    SELF_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf '%s' "$0")"
-fi
-
-cleanup_self() {
-    if [[ -n "$SELF_PATH" && -f "$SELF_PATH" ]]; then
-        rm -f -- "$SELF_PATH" 2>/dev/null || true
-    fi
-}
-
-trap cleanup_self EXIT INT TERM
 
 need_root
 main_menu
