@@ -29,7 +29,7 @@ DNS1=""
 DNS2=""
 
 if [[ -t 1 ]]; then
-    C_TITLE=$'\033[1;36m'
+    C_TITLE=$'\033[1;93m'
     C_OK=$'\033[1;32m'
     C_WARN=$'\033[1;33m'
     C_ERR=$'\033[1;31m'
@@ -40,7 +40,7 @@ else
     C_TITLE=""; C_OK=""; C_WARN=""; C_ERR=""; C_INFO=""; C_DIM=""; C_RESET=""
 fi
 
-LINE="================================================================"
+HEADER_WIDTH=64
 SUBLINE="----------------------------------------------------------------"
 MENU_PAD="  "
 
@@ -68,7 +68,7 @@ print_profile_item() {
 center_text() {
     local text="$1"
     local color="${2:-}"
-    local width=${#LINE}
+    local width=$HEADER_WIDTH
     local len=${#text}
     local pad=0
     if (( width > len )); then
@@ -182,6 +182,18 @@ is_locked() {
     lsattr /etc/resolv.conf 2>/dev/null | awk '{print $1}' | grep -q 'i'
 }
 
+lock_state_raw() {
+    if [[ ! -e /etc/resolv.conf ]]; then
+        echo "missing"
+    elif ! command_exists lsattr; then
+        echo "unknown"
+    elif is_locked; then
+        echo "locked"
+    else
+        echo "unlocked"
+    fi
+}
+
 resolv_mode_raw() {
     if [[ -L /etc/resolv.conf ]]; then
         local target
@@ -202,28 +214,6 @@ resolv_mode_raw() {
     fi
 }
 
-mode_cn() {
-    case "$1" in
-        "resolved link") echo "resolved 接管" ;;
-        "symlink") echo "符号链接" ;;
-        "locked file") echo "普通文件（旧锁定）" ;;
-        "plain file") echo "普通文件" ;;
-        "missing") echo "缺失" ;;
-        *) echo "$1" ;;
-    esac
-}
-
-color_mode() {
-    local mode text
-    mode="$(resolv_mode_raw)"
-    text="$(mode_cn "$mode")"
-    case "$mode" in
-        "plain file") printf "%s%s%s" "$C_OK" "$text" "$C_RESET" ;;
-        "resolved link") printf "%s%s%s" "$C_INFO" "$text" "$C_RESET" ;;
-        "locked file") printf "%s%s%s" "$C_WARN" "$text" "$C_RESET" ;;
-        *) printf "%s%s%s" "$C_WARN" "$text" "$C_RESET" ;;
-    esac
-}
 
 color_resolved() {
     if pkg_installed systemd-resolved; then
@@ -233,15 +223,27 @@ color_resolved() {
     fi
 }
 
+color_lock() {
+    local state
+    state="$(lock_state_raw)"
+    case "$state" in
+        locked) printf "%s已锁定%s" "$C_WARN" "$C_RESET" ;;
+        unlocked) printf "%s未锁定%s" "$C_OK" "$C_RESET" ;;
+        missing) printf "%s无 resolv.conf%s" "$C_WARN" "$C_RESET" ;;
+        *) printf "%s未知%s" "$C_WARN" "$C_RESET" ;;
+    esac
+}
+
 print_header() {
-    echo "$LINE"
-    center_text "$APP_NAME" "$C_TITLE"
-    echo "$LINE"
     echo
-    printf "%sresolved : %b
+    center_text "  $APP_NAME  " "$C_TITLE"
+    echo
+    printf "%sResolved : %b
 " "$MENU_PAD" "$(color_resolved)"
     printf "%sDNS      : %b%s%b
 " "$MENU_PAD" "$C_INFO" "$(current_dns_servers)" "$C_RESET"
+    printf "%sLock     : %b
+" "$MENU_PAD" "$(color_lock)"
     echo
 }
 
@@ -466,9 +468,8 @@ draw_test_dashboard() {
     [[ -t 1 ]] || return 0
 
     printf '\033[H\033[2J'
-    echo "$LINE"
+    echo
     center_text "${APP_NAME}  |  Live DNS test" "$C_TITLE"
-    echo "$LINE"
     echo
     echo "Targets  : Cloudflare @1.1.1.1   |   Google @8.8.8.8"
     echo "Progress : ${query_done}/${query_total}   |   Round ${current_round}/${ITERATIONS}"
@@ -701,8 +702,8 @@ apply_with_resolved_prompt() {
     while true; do
         echo "检测到 systemd-resolved"
         echo "$SUBLINE"
-        print_menu_item "1" "停用 resolved 后写入"
-        print_menu_item "2" "卸载 resolved 后写入"
+        print_menu_item "1" "保留，仅停用后写入"
+        print_menu_item "2" "卸载后写入"
         print_menu_item "0" "取消"
         echo
         if ! read -r -p "${MENU_PAD}请选择 [0-2]: " choice; then
@@ -889,7 +890,6 @@ test_dns() {
     done
 
     test_ui_begin
-    trap 'test_ui_end' RETURN
     draw_test_dashboard "Preparing" "waiting" "$query_done" "$total_queries" 0 "pending" cf_live_status google_live_status
 
     for idx in 0 1; do
@@ -1015,6 +1015,7 @@ test_dns() {
         fi
     done
 
+    test_ui_end
     if [[ -t 1 ]]; then
         printf '\e[H\e[2J'
     fi
@@ -1094,8 +1095,11 @@ main_menu() {
         clear_screen
         print_header
         print_menu_item "1" "DNS 测试"
+        echo
         print_menu_item "2" "应用 DNS"
+        echo
         print_menu_item "3" "清理旧配置"
+        echo
         print_menu_item "0" "退出"
         echo
         if ! read -r -p "${MENU_PAD}请选择 [0-3]: " action; then
@@ -1130,6 +1134,10 @@ main_menu() {
         esac
     done
 }
+
+trap 'test_ui_end' EXIT
+trap 'test_ui_end; exit 130' INT
+trap 'test_ui_end; exit 143' TERM
 
 need_root
 main_menu
