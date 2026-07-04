@@ -25,5 +25,9 @@ wget -qO google_vs_cf.sh https://raw.githubusercontent.com/WhiteMitty/google_vs_
 
 <br>
 
+### 说明
+
+- 仅采用原始方式写入 DNS，若安装了 system-resolved 提示是否删除
+
 ### License
 MIT
