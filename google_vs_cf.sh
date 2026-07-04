@@ -3,8 +3,6 @@
 set -euo pipefail
 
 APP_NAME="google_vs_cf"
-VERSION="0.1.2"
-AUTHOR="Doudou Zhang"
 
 TEST_DNS=("1.1.1.1" "8.8.8.8")
 TEST_LABELS=("Cloudflare" "Google")
@@ -44,6 +42,7 @@ fi
 
 LINE="================================================================"
 SUBLINE="----------------------------------------------------------------"
+MENU_PAD="  "
 
 say()  { echo "$*"; }
 ok()   { echo "${C_OK}$*${C_RESET}"; }
@@ -54,16 +53,16 @@ info() { echo "${C_INFO}$*${C_RESET}"; }
 print_menu_item() {
     local key="$1"
     local title="$2"
-    printf " %b%s%b) %s
-" "$C_INFO" "$key" "$C_RESET" "$title"
+    printf "%s%b%s%b) %s
+" "$MENU_PAD" "$C_INFO" "$key" "$C_RESET" "$title"
 }
 
 print_profile_item() {
     local key="$1"
     local title="$2"
-    local path="$3"
-    printf " %b%s%b) %-14s %s
-" "$C_INFO" "$key" "$C_RESET" "$title" "$path"
+    local dns="$3"
+    printf "%s%b%s%b) %-12s %s
+" "$MENU_PAD" "$C_INFO" "$key" "$C_RESET" "$title" "$dns"
 }
 
 center_text() {
@@ -80,11 +79,31 @@ center_text() {
 }
 
 current_dns_servers() {
-    if [[ ! -e /etc/resolv.conf ]]; then
-        echo "无"
-        return 0
+    local out=""
+    if command_exists resolvectl && [[ "$(service_state systemd-resolved)" == "active" ]]; then
+        out="$(resolvectl dns 2>/dev/null | awk '
+            {
+                for (i=1; i<=NF; i++) {
+                    if ($i ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/ || $i ~ /^[0-9A-Fa-f:]+$/) {
+                        if (!seen[$i]++) {
+                            if (out) out = out " / " $i; else out = $i
+                        }
+                    }
+                }
+            }
+            END { print out }
+        ')"
     fi
-    awk '$1 == "nameserver" { if (out) out = out " / " $2; else out = $2 } END { if (out) print out; else print "未发现 nameserver" }' /etc/resolv.conf 2>/dev/null || echo "读取失败"
+    if [[ -z "$out" && -e /etc/resolv.conf ]]; then
+        out="$(awk '$1 == "nameserver" { if (out) out = out " / " $2; else out = $2 } END { print out }' /etc/resolv.conf 2>/dev/null || true)"
+    fi
+    if [[ -n "$out" ]]; then
+        echo "$out"
+    elif [[ -e /etc/resolv.conf ]]; then
+        echo "未发现 nameserver"
+    else
+        echo "无"
+    fi
 }
 
 print_domain_grid() {
@@ -113,7 +132,7 @@ need_root() {
 
 pause() {
     echo
-    if ! read -r -p "按 Enter 返回..." _dummy; then
+    if ! read -r -p "${MENU_PAD}按 Enter 返回..." _dummy; then
         echo
     fi
 }
@@ -207,31 +226,22 @@ color_mode() {
 }
 
 color_resolved() {
-    local raw package enabled active
-    raw="$(resolved_summary_raw)"
-    IFS='|' read -r package enabled active <<< "$raw"
-
-    if [[ "$package" != "installed" ]]; then
-        printf "%s未安装%s" "$C_DIM" "$C_RESET"
-        return 0
-    fi
-
-    if [[ "$active" == "active" ]]; then
-        printf "%s已安装 / %s / %s%s" "$C_OK" "$enabled" "$active" "$C_RESET"
+    if pkg_installed systemd-resolved; then
+        printf "%s已安装%s" "$C_OK" "$C_RESET"
     else
-        printf "%s已安装 / %s / %s%s" "$C_WARN" "$enabled" "$active" "$C_RESET"
+        printf "%s未安装%s" "$C_DIM" "$C_RESET"
     fi
 }
 
 print_header() {
     echo "$LINE"
     center_text "$APP_NAME" "$C_TITLE"
-    center_text "v ${VERSION}  |  Designed by ${AUTHOR}" "$C_DIM"
     echo "$LINE"
     echo
-    echo "模式     : $(color_mode)"
-    echo "resolved : $(color_resolved)"
-    echo "当前 DNS : $(current_dns_servers)"
+    printf "%sresolved : %b
+" "$MENU_PAD" "$(color_resolved)"
+    printf "%sDNS      : %b%s%b
+" "$MENU_PAD" "$C_INFO" "$(current_dns_servers)" "$C_RESET"
     echo
 }
 
@@ -248,45 +258,34 @@ pkg_install() {
 
 prompt_install_missing() {
     local -a missing=("$@")
-    mapfile -t missing < <(printf '%s\n' "${missing[@]}" | awk 'NF && !seen[$0]++')
-
+    mapfile -t missing < <(printf '%s
+' "${missing[@]}" | awk 'NF && !seen[$0]++')
     if [[ ${#missing[@]} -eq 0 ]]; then
         return 0
     fi
-
     echo
     warn "缺少依赖：${missing[*]}"
-    if ! read -r -p "现在安装？[y/N]: " answer; then
-        echo
-        return 1
-    fi
-    case "$answer" in
-        y|Y) pkg_install "${missing[@]}" ;;
-        *) return 1 ;;
-    esac
+    warn "临时脚本不自动安装依赖，请手动安装后再运行。"
+    return 1
 }
 
 need_test_tools() {
     local -a missing=()
 
-    if ! command_exists dig; then
-        if command_exists apt-cache && apt-cache show bind9-dnsutils >/dev/null 2>&1; then
-            missing+=(bind9-dnsutils)
-        else
-            missing+=(dnsutils)
-        fi
-    fi
-    command_exists timeout || missing+=(coreutils)
-    command_exists awk || missing+=(gawk)
-    command_exists sort || missing+=(coreutils)
+    command_exists dig || missing+=(dig)
+    command_exists timeout || missing+=(timeout)
+    command_exists awk || missing+=(awk)
+    command_exists sort || missing+=(sort)
 
     prompt_install_missing "${missing[@]}"
 }
 
 need_unlock_tool_if_locked() {
     if is_locked && ! command_exists chattr; then
-        prompt_install_missing e2fsprogs
+        err "检测到 /etc/resolv.conf 已锁定，但系统没有 chattr，无法解锁。"
+        return 1
     fi
+    return 0
 }
 
 calc_stats() {
@@ -468,7 +467,7 @@ draw_test_dashboard() {
 
     printf '\033[H\033[2J'
     echo "$LINE"
-    echo "${C_TITLE}${APP_NAME}${C_RESET}  v ${VERSION}  |  Live DNS test"
+    center_text "${APP_NAME}  |  Live DNS test" "$C_TITLE"
     echo "$LINE"
     echo
     echo "Targets  : Cloudflare @1.1.1.1   |   Google @8.8.8.8"
@@ -492,37 +491,37 @@ choose_profile() {
     while true; do
         echo "DNS 方案"
         echo "$SUBLINE"
-        print_profile_item "1" "CF Dual"      "1.1.1.1  ->  1.0.0.1"
-        print_profile_item "2" "Google Dual"  "8.8.8.8  ->  8.8.4.4"
-        print_profile_item "3" "CF First"     "1.1.1.1  ->  8.8.8.8"
-        print_profile_item "4" "Google First" "8.8.8.8  ->  1.1.1.1"
-        print_profile_item "0" "返回"         ""
+        print_profile_item "1" "Cloudflare" "1.1.1.1 / 1.0.0.1"
+        print_profile_item "2" "Google"     "8.8.8.8 / 8.8.4.4"
+        print_profile_item "3" "CF 优先"    "1.1.1.1 / 8.8.8.8"
+        print_profile_item "4" "Google 优先" "8.8.8.8 / 1.1.1.1"
+        print_profile_item "0" "返回"       ""
         echo
-        if ! read -r -p "请选择 [0-4]: " choice; then
+        if ! read -r -p "${MENU_PAD}请选择 [0-4]: " choice; then
             echo
             return 1
         fi
         case "$choice" in
             1)
-                PROFILE_NAME="CF Dual"
+                PROFILE_NAME="Cloudflare"
                 DNS1="1.1.1.1"
                 DNS2="1.0.0.1"
                 return 0
                 ;;
             2)
-                PROFILE_NAME="Google Dual"
+                PROFILE_NAME="Google"
                 DNS1="8.8.8.8"
                 DNS2="8.8.4.4"
                 return 0
                 ;;
             3)
-                PROFILE_NAME="CF First"
+                PROFILE_NAME="CF 优先"
                 DNS1="1.1.1.1"
                 DNS2="8.8.8.8"
                 return 0
                 ;;
             4)
-                PROFILE_NAME="Google First"
+                PROFILE_NAME="Google 优先"
                 DNS1="8.8.8.8"
                 DNS2="1.1.1.1"
                 return 0
@@ -585,23 +584,20 @@ prompt_unlock_old_resolv_lock() {
     fi
 
     echo
-    warn "检测到 /etc/resolv.conf 带有旧的 immutable 锁。新版不会再上锁，但写入前需要先移除旧锁。"
-    if ! read -r -p "是否移除旧锁？[y/N]: " answer; then
+    warn "检测到 /etc/resolv.conf 已被 chattr +i 锁定。"
+    if ! read -r -p "${MENU_PAD}是否先移除旧锁？[y/N]: " answer; then
         echo
         return 1
     fi
     case "$answer" in
         y|Y)
-            if ! need_unlock_tool_if_locked; then
-                warn "缺少 chattr，无法移除旧锁。"
-                return 1
-            fi
+            need_unlock_tool_if_locked || return 1
             chattr -i /etc/resolv.conf 2>/dev/null || true
             if is_locked; then
-                err "旧锁移除失败。"
+                err "解锁失败。"
                 return 1
             fi
-            ok "旧锁已移除。"
+            ok "已解锁。"
             ;;
         *)
             warn "已取消写入。"
@@ -610,10 +606,7 @@ prompt_unlock_old_resolv_lock() {
     esac
 }
 
-write_direct_resolv() {
-    prompt_unlock_old_resolv_lock || return 1
-    cleanup_resolved_dropin
-
+write_resolv_file() {
     rm -f /etc/resolv.conf
     {
         echo "nameserver $DNS1"
@@ -621,53 +614,38 @@ write_direct_resolv() {
         echo "options timeout:2 attempts:2"
     } > /etc/resolv.conf
     chmod 0644 /etc/resolv.conf 2>/dev/null || true
-
-    ok "已写入 /etc/resolv.conf。"
-    warn "未使用 chattr +i，不会给 DNS 文件上锁。"
 }
 
-configure_resolved_profile() {
-    if ! pkg_installed systemd-resolved; then
-        warn "未安装 systemd-resolved。"
-        if ! read -r -p "是否安装并使用 systemd-resolved？[y/N]: " answer; then
-            echo
-            return 1
-        fi
-        case "$answer" in
-            y|Y) pkg_install systemd-resolved ;;
-            *) warn "已取消。"; return 1 ;;
-        esac
+prompt_lock_resolv() {
+    echo
+    if ! read -r -p "${MENU_PAD}是否锁定 /etc/resolv.conf？[y/N]: " answer; then
+        echo
+        return 0
     fi
+    case "$answer" in
+        y|Y)
+            if ! command_exists chattr; then
+                warn "缺少 chattr，无法上锁；DNS 已写入但未锁定。"
+                return 0
+            fi
+            chattr +i /etc/resolv.conf 2>/dev/null || true
+            if is_locked; then
+                ok "DNS 已写入并锁定。"
+            else
+                warn "DNS 已写入，但锁定失败。"
+            fi
+            ;;
+        *)
+            ok "DNS 已写入，未上锁。"
+            ;;
+    esac
+}
 
+write_direct_resolv() {
     prompt_unlock_old_resolv_lock || return 1
-    mkdir -p "$RESOLVED_DROPIN_DIR"
-    cat > "$RESOLVED_DROPIN_FILE" <<CFG
-[Resolve]
-DNS=$DNS1 $DNS2
-Domains=~.
-DNSSEC=no
-CFG
-
-    systemctl unmask systemd-resolved 2>/dev/null || true
-    systemctl enable systemd-resolved >/dev/null 2>&1 || true
-    systemctl restart systemd-resolved
-
-    for _ in {1..15}; do
-        if [[ -e /run/systemd/resolve/stub-resolv.conf || -e /run/systemd/resolve/resolv.conf ]]; then
-            break
-        fi
-        sleep 0.2
-    done
-
-    if [[ -e /run/systemd/resolve/stub-resolv.conf ]]; then
-        ln -snf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-    elif [[ -e /run/systemd/resolve/resolv.conf ]]; then
-        ln -snf /run/systemd/resolve/resolv.conf /etc/resolv.conf
-    else
-        warn "systemd-resolved 已启动，但未找到标准 resolv.conf 目标。"
-    fi
-
-    ok "已通过 systemd-resolved 写入 DNS 方案。"
+    cleanup_resolved_dropin
+    write_resolv_file
+    prompt_lock_resolv
 }
 
 stop_disable_resolved() {
@@ -678,13 +656,12 @@ stop_disable_resolved() {
 
 purge_resolved() {
     if ! pkg_installed systemd-resolved; then
-        warn "systemd-resolved 未安装，无需卸载。"
         return 0
     fi
 
     echo
     warn "卸载 systemd-resolved 可能影响 NetworkManager、netplan 或系统默认 DNS 行为。"
-    if ! read -r -p "确认卸载请输入 yes: " answer; then
+    if ! read -r -p "${MENU_PAD}确认卸载请输入 yes: " answer; then
         echo
         return 1
     fi
@@ -717,43 +694,34 @@ resolved_related_detected() {
 
     [[ "$mode" == "resolved link" ]] && return 0
     [[ "$package" == "installed" ]] && return 0
-    [[ -f "$RESOLVED_DROPIN_FILE" ]] && return 0
     return 1
 }
 
 apply_with_resolved_prompt() {
     while true; do
-        echo "检测到 systemd-resolved / resolved 方案"
+        echo "检测到 systemd-resolved"
         echo "$SUBLINE"
-        print_menu_item "1" "保留 resolved"
-        print_menu_item "2" "停用 resolved"
-        print_menu_item "3" "卸载 resolved"
-        print_menu_item "4" "仅直接写入"
+        print_menu_item "1" "停用 resolved 后写入"
+        print_menu_item "2" "卸载 resolved 后写入"
         print_menu_item "0" "取消"
         echo
-        if ! read -r -p "请选择 [0-4]: " choice; then
+        if ! read -r -p "${MENU_PAD}请选择 [0-2]: " choice; then
             echo
             return 1
         fi
         echo
         case "$choice" in
             1)
-                configure_resolved_profile
-                return $?
-                ;;
-            2)
                 stop_disable_resolved
                 write_direct_resolv
                 return $?
                 ;;
-            3)
-                write_direct_resolv || return 1
+            2)
+                prompt_unlock_old_resolv_lock || return 1
+                write_resolv_file
                 purge_resolved || return 1
-                write_direct_resolv
-                return $?
-                ;;
-            4)
-                write_direct_resolv
+                write_resolv_file
+                prompt_lock_resolv
                 return $?
                 ;;
             0)
@@ -769,13 +737,15 @@ apply_with_resolved_prompt() {
 }
 
 apply_dns_profile() {
-    echo "应用 DNS 方案"
+    echo "应用 DNS"
     echo "$SUBLINE"
     echo
-    echo "方案 : $PROFILE_NAME"
-    echo "DNS  : $DNS1 -> $DNS2"
+    printf "%s方案 : %s
+" "$MENU_PAD" "$PROFILE_NAME"
+    printf "%sDNS  : %s / %s
+" "$MENU_PAD" "$DNS1" "$DNS2"
     echo
-    read -r -p "继续？[y/N]: " answer || { echo; warn "已取消。"; return 1; }
+    read -r -p "${MENU_PAD}继续？[y/N]: " answer || { echo; warn "已取消。"; return 1; }
     case "$answer" in
         y|Y) ;;
         *) warn "已取消。"; return 1 ;;
@@ -1088,11 +1058,11 @@ test_dns() {
 }
 
 cleanup_script_configs() {
-    echo "清理本脚本配置"
+    echo "清理旧配置"
     echo "$SUBLINE"
     echo
-    warn "只删除 google_vs_cf 写入的 drop-in 和旧版 DoH 文件，不卸载系统 DNS 服务。"
-    if ! read -r -p "继续？[y/N]: " answer; then
+    warn "只清理旧版 google_vs_cf 残留：resolved drop-in、旧 DoH 服务/目录，以及可选 DNS 文件锁。"
+    if ! read -r -p "${MENU_PAD}继续？[y/N]: " answer; then
         echo
         return 1
     fi
@@ -1103,9 +1073,19 @@ cleanup_script_configs() {
 
     cleanup_resolved_dropin
     cleanup_legacy_doh
-    if pkg_installed systemd-resolved && [[ "$(service_state systemd-resolved)" == "active" ]]; then
-        systemctl restart systemd-resolved 2>/dev/null || true
+
+    if is_locked; then
+        if read -r -p "${MENU_PAD}检测到 DNS 文件锁，是否移除？[y/N]: " answer; then
+            case "$answer" in
+                y|Y)
+                    if command_exists chattr; then
+                        chattr -i /etc/resolv.conf 2>/dev/null || true
+                    fi
+                    ;;
+            esac
+        fi
     fi
+
     ok "清理完成。"
 }
 
@@ -1113,12 +1093,12 @@ main_menu() {
     while true; do
         clear_screen
         print_header
-        print_menu_item "1" "DNS 测速"
+        print_menu_item "1" "DNS 测试"
         print_menu_item "2" "应用 DNS"
-        print_menu_item "3" "清理配置"
+        print_menu_item "3" "清理旧配置"
         print_menu_item "0" "退出"
         echo
-        if ! read -r -p "请选择 [0-3]: " action; then
+        if ! read -r -p "${MENU_PAD}请选择 [0-3]: " action; then
             clear_screen
             return 0
         fi
