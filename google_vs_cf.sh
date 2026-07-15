@@ -200,15 +200,7 @@ is_ipv4_address() {
     done
 }
 
-is_ipv6_address() {
-    local address="$1"
-    [[ "$address" == *:* \
-        && "$address" =~ [0-9A-Fa-f] \
-        && "$address" =~ ^[0-9A-Fa-f:]+(%[[:alnum:]_.-]+)?$ ]]
-}
-
-current_dns_servers() {
-    local family="${1:-4}"
+current_ipv4_dns_servers() {
     local out=""
     local line token address key
     local -A seen=()
@@ -218,11 +210,7 @@ current_dns_servers() {
         while IFS= read -r line; do
             for token in $line; do
                 address="${token%%#*}"
-                if [[ "$family" == "4" ]]; then
-                    is_ipv4_address "$address" || continue
-                else
-                    is_ipv6_address "$address" || continue
-                fi
+                is_ipv4_address "$address" || continue
                 if [[ -z "${seen["$address"]+present}" ]]; then
                     seen["$address"]=1
                     servers+=("$address")
@@ -234,11 +222,7 @@ current_dns_servers() {
     if [[ ${#servers[@]} -eq 0 && -r /etc/resolv.conf ]]; then
         while read -r key address _; do
             [[ "$key" == "nameserver" && -n "${address:-}" ]] || continue
-            if [[ "$family" == "4" ]]; then
-                is_ipv4_address "$address" || continue
-            else
-                is_ipv6_address "$address" || continue
-            fi
+            is_ipv4_address "$address" || continue
             if [[ -z "${seen["$address"]+present}" ]]; then
                 seen["$address"]=1
                 servers+=("$address")
@@ -483,12 +467,6 @@ on_signal() {
     exit "$rc"
 }
 
-systemd_resolved_present() {
-    pkg_installed systemd-resolved && return 0
-    command_exists systemctl && systemctl cat systemd-resolved.service >/dev/null 2>&1 && return 0
-    [[ -f /usr/lib/systemd/system/systemd-resolved.service || -f /lib/systemd/system/systemd-resolved.service ]]
-}
-
 service_state() {
     local unit="$1"
     if ! command_exists systemctl; then
@@ -509,23 +487,6 @@ service_is_stopped_or_absent() {
             return 1
             ;;
     esac
-}
-
-enabled_state() {
-    local unit="$1"
-    if ! command_exists systemctl; then
-        echo "n/a"
-        return 0
-    fi
-    systemctl is-enabled "$unit" 2>/dev/null || true
-}
-
-resolved_summary_raw() {
-    if systemd_resolved_present; then
-        echo "installed|$(enabled_state systemd-resolved)|$(service_state systemd-resolved)"
-    else
-        echo "not installed|n/a|n/a"
-    fi
 }
 
 is_locked() {
@@ -570,27 +531,6 @@ resolv_mode_raw() {
     fi
 }
 
-
-color_resolved() {
-    local state
-    if systemd_resolved_present; then
-        state="$(service_state systemd-resolved)"
-        case "$state" in
-            active)
-                printf "%s已安装 · 运行中%s" "$C_OK" "$C_RESET"
-                ;;
-            inactive|failed)
-                printf "%s已安装 · 未运行%s" "$C_WARN" "$C_RESET"
-                ;;
-            *)
-                printf "%s已安装 · 状态未知%s" "$C_WARN" "$C_RESET"
-                ;;
-        esac
-    else
-        printf "%s未安装 · 未运行%s" "$C_DIM" "$C_RESET"
-    fi
-}
-
 color_lock() {
     local state
     state="$(lock_state_raw)"
@@ -603,20 +543,13 @@ color_lock() {
 }
 
 print_header() {
-    local dns_v4 dns_v6
+    local dns_v4
 
-    dns_v4="$(current_dns_servers 4)"
-    dns_v6="$(current_dns_servers 6)"
+    dns_v4="$(current_ipv4_dns_servers)"
 
     echo
     print_banner "Google vs Cloudflare · DNS 测速与配置"
-    print_status_line "解析服务" "$(color_resolved)"
     print_status_line "IPv4 DNS" "${dns_v4:-未配置}" "$C_VALUE"
-    if [[ -n "$dns_v6" ]]; then
-        print_status_line "IPv6 DNS" "已检测到（仅显示，不参与测试或写入）" "$C_DIM"
-    else
-        print_status_line "IPv6 DNS" "未配置" "$C_DIM"
-    fi
     print_status_line "配置锁" "$(color_lock)"
     print_rule "$HEADER_WIDTH" "="
     echo
@@ -1029,6 +962,9 @@ cleanup_resolved_dropin() {
         err "删除 resolved drop-in 失败：$RESOLVED_DROPIN_FILE"
         return 1
     fi
+    # Remove the directory only when it became empty. A directory containing
+    # configuration owned by the user or another tool is left untouched.
+    rmdir "$RESOLVED_DROPIN_DIR" 2>/dev/null || true
     if [[ "$reload_active" == "yes" ]] && command_exists systemctl \
         && [[ "$(service_state systemd-resolved)" == "active" ]]; then
         systemctl restart systemd-resolved
@@ -1162,22 +1098,6 @@ write_direct_resolv() {
     prompt_lock_resolv
 }
 
-stop_disable_resolved() {
-    if ! command_exists systemctl; then
-        err "未找到 systemctl，无法安全停用 systemd-resolved。"
-        return 1
-    fi
-    systemctl stop systemd-resolved 2>/dev/null || true
-    if ! service_is_stopped_or_absent systemd-resolved; then
-        err "systemd-resolved 未确认停止，DNS 未写入。当前状态：$(service_state systemd-resolved)"
-        return 1
-    fi
-    if ! systemctl disable systemd-resolved 2>/dev/null; then
-        warn "systemd-resolved 无法禁用或属于静态单元，请留意重启后的状态。"
-    fi
-    cleanup_resolved_dropin || return 1
-}
-
 confirm_purge_resolved() {
     local answer
 
@@ -1190,21 +1110,36 @@ confirm_purge_resolved() {
         return 1
     fi
 
+    clear_screen
+    print_header
+    print_section_title "检测到 systemd-resolved"
+    print_selected_profile
     echo
-    warn "卸载 systemd-resolved 可能影响 NetworkManager、netplan 或系统默认 DNS 行为。"
-    if ! read_user answer "${MENU_PAD}确认卸载请输入 yes: "; then
+    print_detail_line "处理方式" "卸载或停用 systemd-resolved"
+    print_detail_line "DNS 模式" "改为普通 /etc/resolv.conf（仅 IPv4）"
+    echo
+    warn "${MENU_PAD}注意：这可能影响 NetworkManager、netplan 或系统默认 DNS 行为。"
+    echo
+    print_rule
+    echo
+    if ! read_user answer "${MENU_PAD}确认卸载/停用并继续，请输入 yes: "; then
         echo
         return 1
     fi
     answer="${answer,,}"
     if [[ "$answer" != "yes" ]]; then
-        warn "已取消卸载。"
+        warn "已取消，DNS 配置未修改。"
         return 1
     fi
 }
 
 purge_resolved() {
-    if pkg_installed systemd-resolved && ! command_exists apt-get; then
+    local package_installed=0
+
+    if pkg_installed systemd-resolved; then
+        package_installed=1
+    fi
+    if (( package_installed == 1 )) && ! command_exists apt-get; then
         err "未找到 apt-get，无法自动卸载 systemd-resolved。"
         return 1
     fi
@@ -1219,86 +1154,55 @@ purge_resolved() {
     fi
     cleanup_resolved_dropin || return 1
 
-    if pkg_installed systemd-resolved; then
+    if (( package_installed == 1 )); then
         if ! DEBIAN_FRONTEND=noninteractive apt-get purge -y systemd-resolved; then
-            err "systemd-resolved 卸载失败，请检查 apt/dpkg 状态。"
+            err "systemd-resolved 卸载失败；当前已使用普通 /etc/resolv.conf，请检查 apt/dpkg 状态。"
             return 1
         fi
         ok "systemd-resolved 已卸载。"
     else
-        warn "未检测到独立的 systemd-resolved 软件包；已停用现有服务。"
+        # Some distributions ship the unit inside the systemd package, where
+        # it cannot be purged independently. Mask it so it cannot be activated
+        # again behind the plain resolv.conf configuration.
+        if ! systemctl mask systemd-resolved 2>/dev/null; then
+            err "systemd-resolved 没有独立软件包，且无法屏蔽该服务。"
+            return 1
+        fi
+        ok "systemd-resolved 没有独立软件包；已停止并屏蔽该服务。"
     fi
 }
 
 resolved_related_detected() {
-    local mode raw package enabled active
-    mode="$(resolv_mode_raw)"
-    raw="$(resolved_summary_raw)"
-    IFS='|' read -r package enabled active <<< "$raw"
+    [[ "$(resolv_mode_raw)" == "resolved link" ]] && return 0
+    pkg_installed systemd-resolved && return 0
 
-    [[ "$mode" == "resolved link" ]] && return 0
-    [[ "$package" == "installed" ]] && return 0
-    return 1
+    # An inactive bundled or previously masked unit does not participate in
+    # DNS resolution and should not cause the removal prompt on every run.
+    case "$(service_state systemd-resolved)" in
+        active|activating|reloading|deactivating)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 print_selected_profile() {
     print_status_line "所选方案" "$PROFILE_NAME" "$C_INFO"
     print_status_line "IPv4 DNS" "$DNS1 / $DNS2" "$C_VALUE"
-    print_status_line "IPv6 DNS" "不写入（避免在无 IPv6 连接时产生解析超时）" "$C_DIM"
 }
 
-apply_with_resolved_prompt() {
-    local choice
+replace_resolved_with_plain_dns() {
+    confirm_purge_resolved || return 1
+    prompt_unlock_old_resolv_lock || return 1
 
-    while true; do
-        clear_screen
-        print_header
-        print_section_title "应用 DNS 配置"
-        print_selected_profile
-        echo
-        print_section_title "systemd-resolved 处理方式"
-        print_menu_item "1" "保留软件包，仅停用服务后写入"
-        print_menu_item "2" "卸载软件包后写入"
-        print_menu_item "0" "取消并返回"
-        echo
-        print_rule
-        echo
-        if ! read_user choice "${MENU_PAD}请选择 [0-2]: "; then
-            echo
-            return 1
-        fi
-        echo
-        case "$choice" in
-            1)
-                if ! command_exists systemctl; then
-                    err "未找到 systemctl，无法安全停用 systemd-resolved。"
-                    return 1
-                fi
-                prompt_unlock_old_resolv_lock || return 1
-                stop_disable_resolved || return 1
-                write_resolv_file || return 1
-                prompt_lock_resolv
-                return $?
-                ;;
-            2)
-                confirm_purge_resolved || return 1
-                prompt_unlock_old_resolv_lock || return 1
-                write_resolv_file || return 1
-                purge_resolved || return 1
-                write_resolv_file || return 1
-                prompt_lock_resolv
-                return $?
-                ;;
-            0)
-                warn "已取消。"
-                return 1
-                ;;
-            *)
-                warn "无效选择，请输入 0-2。"
-                pause "按 Enter 重新选择..."
-                ;;
-        esac
-    done
+    # Write working DNS before apt runs, then write it again after removal in
+    # case package scripts recreate /etc/resolv.conf or its symlink.
+    write_resolv_file || return 1
+    purge_resolved || return 1
+    write_resolv_file || return 1
+    prompt_lock_resolv
 }
 
 apply_dns_profile() {
@@ -1322,7 +1226,7 @@ apply_dns_profile() {
     prompt_cleanup_legacy || return 1
 
     if resolved_related_detected; then
-        apply_with_resolved_prompt
+        replace_resolved_with_plain_dns
     else
         write_direct_resolv
     fi
