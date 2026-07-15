@@ -2,7 +2,14 @@
 
 set -Eeuo pipefail
 
-APP_NAME="google_vs_cf"
+# Chinese text needs a UTF-8 character locale so Bash can calculate terminal
+# column widths correctly. C.UTF-8 is available on supported Debian/Ubuntu.
+_UTF8_PROBE="测"
+if (( ${#_UTF8_PROBE} != 1 )); then
+    LC_CTYPE=C.UTF-8
+    export LC_CTYPE
+fi
+unset _UTF8_PROBE
 
 TEST_DNS=("1.1.1.1" "8.8.8.8")
 TEST_LABELS=("Cloudflare" "Google")
@@ -40,58 +47,153 @@ if [[ -t 1 ]]; then
     C_OK=$'\033[1;32m'
     C_WARN=$'\033[1;33m'
     C_ERR=$'\033[1;31m'
-    C_INFO=$'\033[1;34m'
+    C_INFO=$'\033[1;36m'
+    C_LINE=$'\033[1;34m'
+    C_VALUE=$'\033[1;35m'
     C_DIM=$'\033[2m'
     C_RESET=$'\033[0m'
 else
-    C_TITLE=""; C_OK=""; C_WARN=""; C_ERR=""; C_INFO=""; C_DIM=""; C_RESET=""
+    C_TITLE=""; C_OK=""; C_WARN=""; C_ERR=""; C_INFO=""; C_LINE=""; C_VALUE=""; C_DIM=""; C_RESET=""
 fi
 
-HEADER_WIDTH=64
-SUBLINE="----------------------------------------------------------------"
+HEADER_WIDTH=78
+COMPARE_WIDTH=81
+REPORT_WIDTH=90
 MENU_PAD="  "
+DISPLAY_WIDTH=0
+REPEATED_TEXT=""
 
-say()  { echo "$*"; }
 ok()   { echo "${C_OK}$*${C_RESET}"; }
 warn() { echo "${C_WARN}$*${C_RESET}"; }
 err()  { echo "${C_ERR}$*${C_RESET}" >&2; }
-info() { echo "${C_INFO}$*${C_RESET}"; }
 
 print_menu_item() {
     local key="$1"
     local title="$2"
-    printf "%s%b%s%b) %s
-" "$MENU_PAD" "$C_INFO" "$key" "$C_RESET" "$title"
+    printf '%s%b%2s%b) %b%s%b\n' \
+        "$MENU_PAD" "$C_INFO" "$key" "$C_RESET" "$C_OK" "$title" "$C_RESET"
 }
 
 print_profile_item() {
     local key="$1"
     local title="$2"
     local dns="$3"
-    printf "%s%b%s%b) %-12s %s
-" "$MENU_PAD" "$C_INFO" "$key" "$C_RESET" "$title" "$dns"
+    local target_width=20 pad
+
+    measure_display_width "$title"
+    pad=$((target_width - DISPLAY_WIDTH))
+    (( pad < 1 )) && pad=1
+
+    printf '%s%b%2s%b) %b%s%b%*s%b%s%b\n' \
+        "$MENU_PAD" "$C_INFO" "$key" "$C_RESET" \
+        "$C_OK" "$title" "$C_RESET" "$pad" "" \
+        "$C_VALUE" "$dns" "$C_RESET"
 }
 
-center_text() {
+measure_display_width() {
     local text="$1"
-    local color="${2:-}"
-    local width=$HEADER_WIDTH
-    local len=${#text}
-    local pad=0
-    if (( width > len )); then
-        pad=$(( (width - len) / 2 ))
-    fi
-    printf "%*s%b%s%b
-" "$pad" "" "$color" "$text" "$C_RESET"
+    local char
+    local i
+    DISPLAY_WIDTH=0
+
+    for ((i=0; i<${#text}; i++)); do
+        char="${text:i:1}"
+        if [[ "$char" == [[:ascii:]] ]]; then
+            DISPLAY_WIDTH=$((DISPLAY_WIDTH + 1))
+        else
+            DISPLAY_WIDTH=$((DISPLAY_WIDTH + 2))
+        fi
+    done
+}
+
+repeat_text() {
+    local char="$1"
+    local count="$2"
+    printf -v REPEATED_TEXT '%*s' "$count" ''
+    REPEATED_TEXT="${REPEATED_TEXT// /$char}"
+}
+
+print_rule() {
+    local width="${1:-$HEADER_WIDTH}"
+    local char="${2:--}"
+    repeat_text "$char" "$width"
+    printf '%b%s%b\n' "$C_LINE" "$REPEATED_TEXT" "$C_RESET"
+}
+
+print_banner() {
+    local title="$1"
+    local available left right
+
+    measure_display_width "$title"
+    available=$((HEADER_WIDTH - DISPLAY_WIDTH - 2))
+    (( available < 4 )) && available=4
+    left=$((available / 2))
+    right=$((available - left))
+
+    repeat_text "=" "$left"
+    local left_line="$REPEATED_TEXT"
+    repeat_text "=" "$right"
+    printf '%b%s%b %b%s%b %b%s%b\n' \
+        "$C_LINE" "$left_line" "$C_RESET" \
+        "$C_TITLE" "$title" "$C_RESET" \
+        "$C_LINE" "$REPEATED_TEXT" "$C_RESET"
+}
+
+print_section_title() {
+    local title="$1"
+    printf '%b%s%b\n' "$C_TITLE" "$title" "$C_RESET"
+    print_rule
+    echo
+}
+
+print_report_title() {
+    local title="$1"
+    local width="${2:-$REPORT_WIDTH}"
+    printf '%b%s%b\n' "$C_TITLE" "$title" "$C_RESET"
+    print_rule "$width"
+    echo
+}
+
+print_status_line() {
+    local label="$1"
+    local value="$2"
+    local value_color="${3:-}"
+    local target_width=12 pad
+
+    measure_display_width "$label"
+    pad=$((target_width - DISPLAY_WIDTH))
+    (( pad < 1 )) && pad=1
+
+    printf '%s%b%s%b%*s : %b%s%b\n' \
+        "$MENU_PAD" "$C_OK" "$label" "$C_RESET" "$pad" "" \
+        "$value_color" "$value" "$C_RESET"
+}
+
+print_detail_line() {
+    local label="$1"
+    local value="$2"
+    local value_color="${3:-}"
+    local target_width=10 pad
+
+    measure_display_width "$label"
+    pad=$((target_width - DISPLAY_WIDTH))
+    (( pad < 1 )) && pad=1
+
+    printf '%s%b%s%b%*s : %b%s%b\n' \
+        "$MENU_PAD" "$C_INFO" "$label" "$C_RESET" "$pad" "" \
+        "$value_color" "$value" "$C_RESET"
 }
 
 current_dns_servers() {
+    local family="${1:-4}"
     local out=""
     if command_exists resolvectl && [[ "$(service_state systemd-resolved)" == "active" ]]; then
-        out="$(resolvectl dns 2>/dev/null | awk '
+        out="$(resolvectl dns 2>/dev/null | awk -v family="$family" '
             {
                 for (i=1; i<=NF; i++) {
-                    if ($i ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/ || $i ~ /^[0-9A-Fa-f:]+$/) {
+                    is_v4 = ($i ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/)
+                    is_v6 = (index($i, ":") > 0 && $i ~ /^[0-9A-Fa-f:%]+$/)
+                    if ((family == 4 && is_v4) || (family == 6 && is_v6)) {
                         if (!seen[$i]++) {
                             if (out) out = out " / " $i; else out = $i
                         }
@@ -102,32 +204,20 @@ current_dns_servers() {
         ')"
     fi
     if [[ -z "$out" && -e /etc/resolv.conf ]]; then
-        out="$(awk '$1 == "nameserver" { if (out) out = out " / " $2; else out = $2 } END { print out }' /etc/resolv.conf 2>/dev/null || true)"
+        out="$(awk -v family="$family" '
+            $1 == "nameserver" {
+                is_v4 = ($2 ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/)
+                is_v6 = (index($2, ":") > 0)
+                if ((family == 4 && is_v4) || (family == 6 && is_v6)) {
+                    if (!seen[$2]++) {
+                        if (out) out = out " / " $2; else out = $2
+                    }
+                }
+            }
+            END { print out }
+        ' /etc/resolv.conf 2>/dev/null || true)"
     fi
-    if [[ -n "$out" ]]; then
-        echo "$out"
-    elif [[ -e /etc/resolv.conf ]]; then
-        echo "未发现 nameserver"
-    else
-        echo "无"
-    fi
-}
-
-print_domain_grid() {
-    local cols=3
-    local width=22
-    local i j idx
-    for ((i=0; i<${#DOMAINS[@]}; i+=cols)); do
-        for ((j=0; j<cols; j++)); do
-            idx=$((i + j))
-            if (( idx < ${#DOMAINS[@]} )); then
-                printf "  %b%02d%b) %b%-*s%b" \
-                    "$C_DIM" "$((idx + 1))" "$C_RESET" \
-                    "$C_INFO" "$width" "${DOMAINS[$idx]}" "$C_RESET"
-            fi
-        done
-        printf "\n"
-    done
+    printf '%s\n' "$out"
 }
 
 need_root() {
@@ -348,10 +438,22 @@ resolv_mode_raw() {
 
 
 color_resolved() {
+    local state
     if systemd_resolved_present; then
-        printf "%s已安装%s" "$C_OK" "$C_RESET"
+        state="$(service_state systemd-resolved)"
+        case "$state" in
+            active)
+                printf "%s已安装 · 运行中%s" "$C_OK" "$C_RESET"
+                ;;
+            inactive|failed)
+                printf "%s已安装 · 未运行%s" "$C_WARN" "$C_RESET"
+                ;;
+            *)
+                printf "%s已安装 · 状态未知%s" "$C_WARN" "$C_RESET"
+                ;;
+        esac
     else
-        printf "%s未安装%s" "$C_DIM" "$C_RESET"
+        printf "%s未安装 · 未运行%s" "$C_DIM" "$C_RESET"
     fi
 }
 
@@ -367,15 +469,22 @@ color_lock() {
 }
 
 print_header() {
+    local dns_v4 dns_v6
+
+    dns_v4="$(current_dns_servers 4)"
+    dns_v6="$(current_dns_servers 6)"
+
     echo
-    center_text "  $APP_NAME  " "$C_TITLE"
-    echo
-    printf "%sResolved : %b
-" "$MENU_PAD" "$(color_resolved)"
-    printf "%sDNS      : %b%s%b
-" "$MENU_PAD" "$C_INFO" "$(current_dns_servers)" "$C_RESET"
-    printf "%sLock     : %b
-" "$MENU_PAD" "$(color_lock)"
+    print_banner "Google vs Cloudflare · DNS 测速与配置"
+    print_status_line "解析服务" "$(color_resolved)"
+    print_status_line "IPv4 DNS" "${dns_v4:-未配置}" "$C_VALUE"
+    if [[ -n "$dns_v6" ]]; then
+        print_status_line "IPv6 DNS" "已检测到（仅显示，不参与测试或写入）" "$C_DIM"
+    else
+        print_status_line "IPv6 DNS" "未配置" "$C_DIM"
+    fi
+    print_status_line "配置锁" "$(color_lock)"
+    print_rule "$HEADER_WIDTH" "="
     echo
 }
 
@@ -524,28 +633,8 @@ dns_a_is_better() {
         }'
 }
 
-fmt_header() {
-    printf "%b%-20s%b | %-5s | %-5s | %-7s | %-7s | %-7s | %-4s | %-4s\n" \
-        "$C_TITLE" "$1" "$C_RESET" "Min" "Max" "Avg" "Median" "P90" "Bad" "0ms"
-}
-
-fmt_row() {
-    local label="$1"
-    local min="$2"
-    local max="$3"
-    local avg="$4"
-    local median="$5"
-    local p90="$6"
-    local bad="$7"
-    local zero="$8"
-    local color="${9:-$C_INFO}"
-
-    printf "%b%-20s%b | %-5s | %-5s | %-7s | %-7s | %-7s | %-4s | %-4s\n" \
-        "$color" "$label" "$C_RESET" "$min" "$max" "$avg" "$median" "$p90" "$bad" "$zero"
-}
-
 fmt_summary_header() {
-    printf "%b%-22s%b | %-7s | %-7s | %-7s | %-4s | %-4s | %-6s\n" \
+    printf "%b%-24s%b | %8s | %8s | %8s | %5s | %5s | %8s\n" \
         "$C_TITLE" "Resolver" "$C_RESET" "Avg" "Median" "P90" "Bad" "0ms" "Score"
 }
 
@@ -559,13 +648,17 @@ fmt_summary_row() {
     local score="$7"
     local color="${8:-$C_INFO}"
 
-    printf "%b%-22s%b | %-7s | %-7s | %-7s | %-4s | %-4s | %-6s\n" \
+    printf "%b%-24s%b | %8s | %8s | %8s | %5s | %5s | %8s\n" \
         "$color" "$label" "$C_RESET" "$avg" "$median" "$p90" "$bad" "$zero" "$score"
 }
 
 fmt_compare_header() {
-    printf "%b%-20s%b | %-6s | %-6s | %-4s | %-4s || %-6s | %-6s | %-4s | %-4s\n" \
-        "$C_TITLE" "Domain" "$C_RESET" "CF Med" "CF P90" "Bad" "0ms" "GG Med" "GG P90" "Bad" "0ms"
+    printf "%b%-20s%b | %b%-27s%b || %b%-27s%b\n" \
+        "$C_TITLE" "Domain" "$C_RESET" \
+        "$C_INFO" "Cloudflare" "$C_RESET" \
+        "$C_INFO" "Google" "$C_RESET"
+    printf "%-20s | %7s %7s %5s %5s || %7s %7s %5s %5s\n" \
+        "" "Median" "P90" "Bad" "0ms" "Median" "P90" "Bad" "0ms"
 }
 
 fmt_compare_row() {
@@ -579,7 +672,7 @@ fmt_compare_row() {
     local google_bad="$8"
     local google_zero="$9"
 
-    printf "%-20s | %-6s | %-6s | %-4s | %-4s || %-6s | %-6s | %-4s | %-4s\n" \
+    printf "%-20s | %7s %7s %5s %5s || %7s %7s %5s %5s\n" \
         "$domain" "$cf_median" "$cf_p90" "$cf_bad" "$cf_zero" "$google_median" "$google_p90" "$google_bad" "$google_zero"
 }
 
@@ -677,14 +770,15 @@ draw_test_dashboard() {
 
     printf '\033[H\033[2J'
     echo
-    center_text "${APP_NAME}  |  Live DNS test" "$C_TITLE"
-    echo
-    echo "Targets  : Cloudflare @1.1.1.1   |   Google @8.8.8.8"
-    echo "Progress : ${query_done}/${query_total}   |   Round ${current_round}/${ITERATIONS}"
-    echo "Current  : ${current_label}  ->  ${current_domain}  (${current_status})"
+    print_banner "Google vs Cloudflare · DNS 实时测速"
+    print_status_line "测试目标" "Cloudflare @1.1.1.1  |  Google @8.8.8.8" "$C_VALUE"
+    print_status_line "测试模式" "IPv4 DNS 服务器 · A 记录查询"
+    print_status_line "测试进度" "${query_done}/${query_total} · 第 ${current_round}/${ITERATIONS} 轮"
+    print_status_line "当前查询" "${current_label} → ${current_domain}（${current_status}）"
+    print_rule "$HEADER_WIDTH" "="
     echo
     printf "%b%-3s %-24s %-18s %-18s%b\n" "$C_TITLE" "#" "Domain" "Cloudflare" "Google" "$C_RESET"
-    echo "$SUBLINE"
+    print_rule
     for ((i=0; i<${#DOMAINS[@]}; i++)); do
         domain="${DOMAINS[$i]}"
         cf_live="${cf_live_ref[$i]:-...}"
@@ -692,17 +786,18 @@ draw_test_dashboard() {
         printf "%b%02d%b  %-24.24s %-18s %-18s\n" "$C_DIM" "$((i + 1))" "$C_RESET" "$domain" "$cf_live" "$google_live"
     done
     echo
-    echo "Legend   : Nms = success, 0ms = ignored, bad = failed/timeout, ... = pending"
-    echo "Method   : round-robin across domains, ${ITERATIONS} rounds per domain, 0 ms ignored"
+    printf '%s说明：Nms=成功，0ms=忽略，bad=失败/超时，...=等待\n' "$MENU_PAD"
+    printf '%s方法：按域名轮询，每个域名测试 %s 轮；0 ms 不计入统计\n' "$MENU_PAD" "$ITERATIONS"
 }
 
 choose_profile() {
     while true; do
-        echo "DNS 方案"
-        echo "$SUBLINE"
+        clear_screen
+        print_header
+        print_section_title "DNS 方案"
         print_profile_item "1" "Cloudflare" "1.1.1.1 / 1.0.0.1"
         print_profile_item "2" "Google"     "8.8.8.8 / 8.8.4.4"
-        print_profile_item "3" "CF 优先"    "1.1.1.1 / 8.8.8.8"
+        print_profile_item "3" "Cloudflare 优先" "1.1.1.1 / 8.8.8.8"
         print_profile_item "4" "Google 优先" "8.8.8.8 / 1.1.1.1"
         print_profile_item "0" "返回"       ""
         echo
@@ -724,7 +819,7 @@ choose_profile() {
                 return 0
                 ;;
             3)
-                PROFILE_NAME="CF 优先"
+                PROFILE_NAME="Cloudflare 优先"
                 DNS1="1.1.1.1"
                 DNS2="8.8.8.8"
                 return 0
@@ -1002,11 +1097,11 @@ resolved_related_detected() {
 
 apply_with_resolved_prompt() {
     while true; do
-        echo "检测到 systemd-resolved"
-        echo "$SUBLINE"
-        print_menu_item "1" "保留，仅停用后写入"
-        print_menu_item "2" "卸载后写入"
-        print_menu_item "0" "取消"
+        echo
+        print_section_title "systemd-resolved 处理方式"
+        print_menu_item "1" "保留软件包，仅停用服务后写入"
+        print_menu_item "2" "卸载软件包后写入"
+        print_menu_item "0" "取消并返回"
         echo
         if ! read_user choice "${MENU_PAD}请选择 [0-2]: "; then
             echo
@@ -1049,13 +1144,12 @@ apply_with_resolved_prompt() {
 apply_dns_profile() {
     need_dns_write_tools || return 1
 
-    echo "应用 DNS"
-    echo "$SUBLINE"
-    echo
-    printf "%s方案 : %s
-" "$MENU_PAD" "$PROFILE_NAME"
-    printf "%sDNS  : %s / %s
-" "$MENU_PAD" "$DNS1" "$DNS2"
+    clear_screen
+    print_header
+    print_section_title "应用 DNS 配置"
+    print_status_line "所选方案" "$PROFILE_NAME" "$C_INFO"
+    print_status_line "IPv4 DNS" "$DNS1 / $DNS2" "$C_VALUE"
+    print_status_line "IPv6 DNS" "不写入（避免在无 IPv6 连接时产生解析超时）" "$C_DIM"
     echo
     read_user answer "${MENU_PAD}继续？[y/N]: " || { echo; warn "已取消。"; return 1; }
     case "$answer" in
@@ -1088,22 +1182,20 @@ print_recommendation() {
     local total_rounds="${13}"
 
     echo
-    echo "推荐结果"
-    echo "$SUBLINE"
-    echo
+    print_report_title "推荐结果"
 
     if [[ "$cf_score" == "N/A" && "$google_score" == "N/A" ]]; then
-        warn "没有有效结果。"
+        print_detail_line "结论" "没有有效结果" "$C_WARN"
         return 0
     fi
 
     if [[ "$cf_score" == "N/A" ]]; then
-        ok "建议使用 Google。Cloudflare 没有有效评分。"
+        print_detail_line "结论" "建议使用 Google；Cloudflare 没有有效评分" "$C_OK"
         return 0
     fi
 
     if [[ "$google_score" == "N/A" ]]; then
-        ok "建议使用 Cloudflare。Google 没有有效评分。"
+        print_detail_line "结论" "建议使用 Cloudflare；Google 没有有效评分" "$C_OK"
         return 0
     fi
 
@@ -1156,18 +1248,20 @@ print_recommendation() {
         level="强烈推荐"
     fi
 
-    ok "${level}：${winner}"
-    echo "原因   : 优先比较失败率，其次比较 median、p90、average。"
-    echo "Score  : $winner $winner_score  vs  $loser $loser_score"
-    echo "Winner : bad $winner_bad/$total_rounds ($winner_ratio), median $winner_median ms, p90 $winner_p90 ms, avg $winner_avg ms"
-    echo "Loser  : bad $loser_bad/$total_rounds ($loser_ratio), median $loser_median ms, p90 $loser_p90 ms, avg $loser_avg ms"
+    print_detail_line "结论" "${level}：${winner}" "$C_OK"
+    print_detail_line "比较原则" "失败率 → Median → P90 → Average"
+    print_detail_line "综合得分" "$winner $winner_score  vs  $loser $loser_score"
+    print_detail_line "推荐方" "$winner · 失败 $winner_bad/$total_rounds（$winner_ratio）"
+    print_detail_line "推荐指标" "Median $winner_median ms · P90 $winner_p90 ms · Average $winner_avg ms"
+    print_detail_line "对照方" "$loser · 失败 $loser_bad/$total_rounds（$loser_ratio）"
+    print_detail_line "对照指标" "Median $loser_median ms · P90 $loser_p90 ms · Average $loser_avg ms"
 
     if (( cf_zero > 0 || google_zero > 0 )); then
-        echo "0ms    : 0 ms 已忽略，不参与统计和推荐。"
+        print_detail_line "样本处理" "0 ms 样本已忽略，不参与统计和推荐"
     fi
 
-    echo "Model  : score = median + 0.35*(p90-median) + 0.10*(avg-median) + 25*bad_ratio"
-    echo "Method : round-robin sampling across domains, $ITERATIONS rounds per domain."
+    print_detail_line "评分模型" "Score = Median + 0.35×尾延迟 + 0.10×偏斜 + 25×失败率"
+    print_detail_line "测试方法" "按域名轮询，每个域名测试 $ITERATIONS 轮"
 }
 
 test_dns() {
@@ -1325,11 +1419,9 @@ test_dns() {
         printf '\e[H\e[2J'
     fi
 
-    echo "Compare report"
-    echo "$SUBLINE"
-    echo
+    print_report_title "域名对比" "$COMPARE_WIDTH"
     fmt_compare_header
-    echo "$SUBLINE"
+    print_rule "$COMPARE_WIDTH"
     for domain in "${DOMAINS[@]}"; do
         fmt_compare_row \
             "$domain" \
@@ -1344,11 +1436,9 @@ test_dns() {
     done
 
     echo
-    echo "Summary"
-    echo "$SUBLINE"
-    echo
+    print_report_title "总体汇总"
     fmt_summary_header
-    echo "$SUBLINE"
+    print_rule "$REPORT_WIDTH"
     printf "%s\n" "${summary_rows[@]}" | sort -t'|' -k1,1g | while IFS='|' read -r sort_key score_display label dns avg median p90 bad zero; do
         fmt_summary_row "${label} @${dns}" "$avg" "$median" "$p90" "$bad" "$zero" "$score_display"
     done
@@ -1364,9 +1454,9 @@ test_dns() {
 }
 
 cleanup_script_configs() {
-    echo "清理旧配置"
-    echo "$SUBLINE"
-    echo
+    clear_screen
+    print_header
+    print_section_title "清理旧版配置"
     warn "只清理旧版 google_vs_cf 残留：resolved drop-in、旧 DoH 服务/目录，以及可选 DNS 文件锁。"
     if ! read_user answer "${MENU_PAD}继续？[y/N]: "; then
         echo
@@ -1405,13 +1495,14 @@ main_menu() {
     while true; do
         clear_screen
         print_header
-        print_menu_item "1" "DNS 测试"
+        print_section_title "操作菜单"
+        print_menu_item "1" "DNS 性能测试"
         echo
-        print_menu_item "2" "应用 DNS"
+        print_menu_item "2" "应用 DNS 配置"
         echo
-        print_menu_item "3" "清理旧配置"
+        print_menu_item "3" "清理旧版配置"
         echo
-        print_menu_item "0" "退出"
+        print_menu_item "0" "退出脚本"
         echo
         if ! read_user action "${MENU_PAD}请选择 [0-3]: "; then
             clear_screen
@@ -1427,8 +1518,8 @@ main_menu() {
             2)
                 if choose_profile; then
                     apply_dns_profile || true
+                    pause
                 fi
-                pause
                 ;;
             3)
                 cleanup_script_configs || true
