@@ -59,7 +59,7 @@ fi
 
 HEADER_WIDTH=78
 COMPARE_WIDTH=81
-REPORT_WIDTH=90
+REPORT_WIDTH=84
 MENU_PAD="  "
 DISPLAY_WIDTH=0
 REPEATED_TEXT=""
@@ -99,11 +99,14 @@ measure_display_width() {
 
     for ((i=0; i<${#text}; i++)); do
         char="${text:i:1}"
-        if [[ "$char" == [[:ascii:]] ]]; then
-            DISPLAY_WIDTH=$((DISPLAY_WIDTH + 1))
-        else
-            DISPLAY_WIDTH=$((DISPLAY_WIDTH + 2))
-        fi
+        case "$char" in
+            [[:ascii:]]|·|×|→|←|↔)
+                DISPLAY_WIDTH=$((DISPLAY_WIDTH + 1))
+                ;;
+            *)
+                DISPLAY_WIDTH=$((DISPLAY_WIDTH + 2))
+                ;;
+        esac
     done
 }
 
@@ -185,39 +188,67 @@ print_detail_line() {
         "$value_color" "$value" "$C_RESET"
 }
 
+is_ipv4_address() {
+    local address="$1"
+    local a b c d extra octet
+
+    [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS='.' read -r a b c d extra <<< "$address"
+    [[ -z "${extra:-}" ]] || return 1
+    for octet in "$a" "$b" "$c" "$d"; do
+        (( 10#$octet <= 255 )) || return 1
+    done
+}
+
+is_ipv6_address() {
+    local address="$1"
+    [[ "$address" == *:* \
+        && "$address" =~ [0-9A-Fa-f] \
+        && "$address" =~ ^[0-9A-Fa-f:]+(%[[:alnum:]_.-]+)?$ ]]
+}
+
 current_dns_servers() {
     local family="${1:-4}"
     local out=""
+    local line token address key
+    local -A seen=()
+    local -a servers=()
+
     if command_exists resolvectl && [[ "$(service_state systemd-resolved)" == "active" ]]; then
-        out="$(resolvectl dns 2>/dev/null | awk -v family="$family" '
-            {
-                for (i=1; i<=NF; i++) {
-                    is_v4 = ($i ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/)
-                    is_v6 = (index($i, ":") > 0 && $i ~ /^[0-9A-Fa-f:%]+$/)
-                    if ((family == 4 && is_v4) || (family == 6 && is_v6)) {
-                        if (!seen[$i]++) {
-                            if (out) out = out " / " $i; else out = $i
-                        }
-                    }
-                }
-            }
-            END { print out }
-        ')"
+        while IFS= read -r line; do
+            for token in $line; do
+                address="${token%%#*}"
+                if [[ "$family" == "4" ]]; then
+                    is_ipv4_address "$address" || continue
+                else
+                    is_ipv6_address "$address" || continue
+                fi
+                if [[ -z "${seen["$address"]+present}" ]]; then
+                    seen["$address"]=1
+                    servers+=("$address")
+                fi
+            done
+        done < <(resolvectl dns 2>/dev/null || true)
     fi
-    if [[ -z "$out" && -e /etc/resolv.conf ]]; then
-        out="$(awk -v family="$family" '
-            $1 == "nameserver" {
-                is_v4 = ($2 ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/)
-                is_v6 = (index($2, ":") > 0)
-                if ((family == 4 && is_v4) || (family == 6 && is_v6)) {
-                    if (!seen[$2]++) {
-                        if (out) out = out " / " $2; else out = $2
-                    }
-                }
-            }
-            END { print out }
-        ' /etc/resolv.conf 2>/dev/null || true)"
+
+    if [[ ${#servers[@]} -eq 0 && -r /etc/resolv.conf ]]; then
+        while read -r key address _; do
+            [[ "$key" == "nameserver" && -n "${address:-}" ]] || continue
+            if [[ "$family" == "4" ]]; then
+                is_ipv4_address "$address" || continue
+            else
+                is_ipv6_address "$address" || continue
+            fi
+            if [[ -z "${seen["$address"]+present}" ]]; then
+                seen["$address"]=1
+                servers+=("$address")
+            fi
+        done < /etc/resolv.conf
     fi
+
+    for address in "${servers[@]}"; do
+        out+="${out:+ / }$address"
+    done
     printf '%s\n' "$out"
 }
 
@@ -230,15 +261,17 @@ need_root() {
 
 pause() {
     local _dummy
+    local prompt="${1:-按 Enter 返回...}"
 
     echo
-    if ! read_user _dummy "${MENU_PAD}按 Enter 返回..."; then
+    if ! read_user _dummy "${MENU_PAD}${prompt}"; then
         echo
     fi
 }
 
 clear_screen() {
-    clear 2>/dev/null || true
+    [[ -t 1 ]] && printf '\033[H\033[2J'
+    return 0
 }
 
 pkg_installed() {
@@ -251,19 +284,34 @@ command_exists() {
 }
 
 validate_runtime_settings() {
+    local iterations_value timeout_value
+
     if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
         err "需要 Bash 4.3 或更高版本。"
         return 1
     fi
-    if [[ ! "$ITERATIONS" =~ ^[0-9]+$ || $ITERATIONS -lt 1 || $ITERATIONS -gt 100 ]]; then
+    if [[ ! "$ITERATIONS" =~ ^[0-9]+$ || ${#ITERATIONS} -gt 3 ]]; then
         err "ITERATIONS 必须是 1 到 100 的整数。"
         return 1
     fi
-    if [[ ! "$DIG_TIMEOUT" =~ ^[0-9]+$ || $DIG_TIMEOUT -lt 1 || $DIG_TIMEOUT -gt 30 ]]; then
+    iterations_value=$((10#$ITERATIONS))
+    if (( iterations_value < 1 || iterations_value > 100 )); then
+        err "ITERATIONS 必须是 1 到 100 的整数。"
+        return 1
+    fi
+    if [[ ! "$DIG_TIMEOUT" =~ ^[0-9]+$ || ${#DIG_TIMEOUT} -gt 2 ]]; then
         err "DIG_TIMEOUT 必须是 1 到 30 的整数。"
         return 1
     fi
-    OUTER_TIMEOUT=$((DIG_TIMEOUT + 1))
+    timeout_value=$((10#$DIG_TIMEOUT))
+    if (( timeout_value < 1 || timeout_value > 30 )); then
+        err "DIG_TIMEOUT 必须是 1 到 30 的整数。"
+        return 1
+    fi
+
+    ITERATIONS="$iterations_value"
+    DIG_TIMEOUT="$timeout_value"
+    OUTER_TIMEOUT=$((timeout_value + 1))
 }
 
 capture_self_path() {
@@ -295,10 +343,12 @@ setup_input() {
     #   bash <(curl -fsSL URL)
     #   curl -fsSL URL | bash
     # The latter shares stdin with the script body, so prompts must use /dev/tty.
-    if { exec {INPUT_FD}</dev/tty; } 2>/dev/null; then
+    if true 2>/dev/null </dev/tty \
+        && { exec {INPUT_FD}<>/dev/tty; } 2>/dev/null; then
         INPUT_FD_OWNED=1
     else
         INPUT_FD=-1
+        return 1
     fi
 }
 
@@ -314,10 +364,14 @@ read_user() {
     # explicitly so it remains visible after the live test dashboard exits.
     test_ui_end
     if [[ -n "$prompt" ]]; then
-        if printf '%s' "$prompt" 2>/dev/null > /dev/tty; then
-            :
+        if (( INPUT_FD_OWNED == 1 )); then
+            printf '%s' "$prompt" >&"$INPUT_FD"
         elif [[ -t 1 ]]; then
             printf '%s' "$prompt"
+        elif [[ -t 2 ]]; then
+            printf '%s' "$prompt" >&2
+        elif printf '%s' "$prompt" 2>/dev/null > /dev/tty; then
+            :
         else
             printf '%s' "$prompt" >&2
         fi
@@ -352,7 +406,7 @@ remove_runtime_script() {
         esac
         [[ -f "$path" || -L "$path" ]] || continue
         if ! rm -f -- "$path" 2>/dev/null; then
-            printf '%b无法删除运行脚本：%s%b\n' "$C_ERR" "$path" "$C_RESET" >&2
+            printf '%b无法删除运行脚本：%s%b\n' "$C_ERR" "$path" "$C_RESET" >&2 || true
         fi
     done
     return 0
@@ -361,7 +415,7 @@ remove_runtime_script() {
 stop_active_query() {
     local pid="$ACTIVE_QUERY_PID"
     local fd="$ACTIVE_QUERY_FD"
-    local _cleanup_line
+    local child children=""
     ACTIVE_QUERY_FD=""
 
     if [[ -z "$pid" ]]; then
@@ -372,12 +426,21 @@ stop_active_query() {
     fi
 
     if kill -0 "$pid" 2>/dev/null; then
-        # GNU timeout forwards TERM to dig. Give it a short built-in grace
-        # period, then force-stop timeout if it has not exited.
-        kill -TERM "$pid" 2>/dev/null || true
-        if kill -0 "$pid" 2>/dev/null && [[ -n "$fd" ]]; then
-            IFS= read -r -t 0.25 _cleanup_line <&"$fd" || true
+        # Stop the monitored dig process first, then its timeout parent. This
+        # avoids leaving an orphan if timeout itself must later be force-killed.
+        if [[ -r "/proc/$pid/task/$pid/children" ]]; then
+            IFS= read -r children < "/proc/$pid/task/$pid/children" || true
         fi
+        for child in $children; do
+            [[ "$child" =~ ^[0-9]+$ ]] || continue
+            kill -TERM "$child" 2>/dev/null || true
+        done
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 0.10 2>/dev/null || true
+        for child in $children; do
+            [[ "$child" =~ ^[0-9]+$ ]] || continue
+            kill -KILL "$child" 2>/dev/null || true
+        done
         if kill -0 "$pid" 2>/dev/null; then
             kill -KILL "$pid" 2>/dev/null || true
         fi
@@ -391,27 +454,31 @@ stop_active_query() {
 }
 
 cleanup_runtime() {
-    stop_active_query
+    stop_active_query || true
     if [[ -n "$RUNTIME_TEMP_FILE" ]]; then
         rm -f -- "$RUNTIME_TEMP_FILE" 2>/dev/null || true
         RUNTIME_TEMP_FILE=""
     fi
-    test_ui_end
-    close_input_fd
-    remove_runtime_script
+    test_ui_end || true
+    close_input_fd || true
+    remove_runtime_script || true
 }
 
 on_exit() {
     local rc="$1"
-    trap - EXIT INT TERM HUP QUIT
-    cleanup_runtime
+    trap - EXIT
+    trap '' INT TERM HUP QUIT
+    cleanup_runtime || true
+    trap - INT TERM HUP QUIT
     return "$rc"
 }
 
 on_signal() {
     local rc="$1"
-    trap - EXIT INT TERM HUP QUIT
-    cleanup_runtime
+    trap - EXIT
+    trap '' INT TERM HUP QUIT
+    cleanup_runtime || true
+    trap - INT TERM HUP QUIT
     printf '\n'
     exit "$rc"
 }
@@ -462,9 +529,13 @@ resolved_summary_raw() {
 }
 
 is_locked() {
+    local attrs
+
     [[ -e /etc/resolv.conf ]] || return 1
     command_exists lsattr || return 1
-    lsattr /etc/resolv.conf 2>/dev/null | awk '{print $1}' | grep -q 'i'
+    attrs="$(lsattr -d -- /etc/resolv.conf 2>/dev/null)" || return 1
+    attrs="${attrs%%[[:space:]]*}"
+    [[ "$attrs" == *i* ]]
 }
 
 lock_state_raw() {
@@ -648,10 +719,10 @@ calc_bad_ratio() {
     local total="$2"
     awk -v bad="$bad" -v total="$total" 'BEGIN {
         if (total <= 0) {
-            printf "1.0000"
+            printf "100.00%%"
             exit
         }
-        printf "%.4f", bad / total
+        printf "%.2f%%", (bad / total) * 100
     }'
 }
 
@@ -840,16 +911,16 @@ draw_test_dashboard() {
     print_status_line "当前查询" "${current_label} → ${current_domain}（${current_status}）"
     print_rule "$HEADER_WIDTH" "="
     echo
-    printf "%b%-3s %-24s %-18s %-18s%b\n" "$C_TITLE" "#" "Domain" "Cloudflare" "Google" "$C_RESET"
+    printf "%b%-3s %-24s %-24s %-24s%b\n" "$C_TITLE" "#" "Domain" "Cloudflare" "Google" "$C_RESET"
     print_rule
     for ((i=0; i<${#DOMAINS[@]}; i++)); do
         domain="${DOMAINS[$i]}"
         cf_live="${cf_live_ref[$i]:-...}"
         google_live="${google_live_ref[$i]:-...}"
-        printf "%b%02d%b  %-24.24s %-18s %-18s\n" "$C_DIM" "$((i + 1))" "$C_RESET" "$domain" "$cf_live" "$google_live"
+        printf "%b%02d%b  %-24.24s %-24s %-24s\n" "$C_DIM" "$((i + 1))" "$C_RESET" "$domain" "$cf_live" "$google_live"
     done
     echo
-    printf '%s说明：Nms=成功，0ms=忽略，bad=失败/超时，...=等待\n' "$MENU_PAD"
+    printf '%s说明：12ms = 成功；0ms = 忽略；bad = 失败/超时；... = 等待\n' "$MENU_PAD"
     printf '%s方法：按域名轮询，每个域名测试 %s 轮；0 ms 不计入统计\n' "$MENU_PAD" "$ITERATIONS"
 }
 
@@ -901,10 +972,10 @@ choose_profile() {
                 return 1
                 ;;
             *)
-                warn "无效选择。"
+                warn "无效选择，请输入 0-4。"
+                pause "按 Enter 重新选择..."
                 ;;
         esac
-        echo
     done
 }
 
@@ -987,7 +1058,7 @@ prompt_cleanup_legacy() {
             fi
             ;;
         *)
-            warn "已保留旧版 DoH 配置。"
+            warn "已保留旧版 DoH 配置；旧服务可能覆盖本次 DNS 设置。"
             ;;
     esac
 }
@@ -1025,11 +1096,12 @@ prompt_unlock_old_resolv_lock() {
 write_resolv_file() {
     local tmp_file
 
-    if ! tmp_file="$(mktemp /etc/.google_vs_cf.resolv.conf.XXXXXX)"; then
+    if ! RUNTIME_TEMP_FILE="$(mktemp /etc/.google_vs_cf.resolv.conf.XXXXXX)"; then
+        RUNTIME_TEMP_FILE=""
         err "无法在 /etc 中创建临时 DNS 文件。"
         return 1
     fi
-    RUNTIME_TEMP_FILE="$tmp_file"
+    tmp_file="$RUNTIME_TEMP_FILE"
 
     if ! {
         printf 'nameserver %s\n' "$DNS1"
@@ -1148,8 +1220,7 @@ purge_resolved() {
     cleanup_resolved_dropin || return 1
 
     if pkg_installed systemd-resolved; then
-        export DEBIAN_FRONTEND=noninteractive
-        if ! apt-get purge -y systemd-resolved; then
+        if ! DEBIAN_FRONTEND=noninteractive apt-get purge -y systemd-resolved; then
             err "systemd-resolved 卸载失败，请检查 apt/dpkg 状态。"
             return 1
         fi
@@ -1170,10 +1241,20 @@ resolved_related_detected() {
     return 1
 }
 
+print_selected_profile() {
+    print_status_line "所选方案" "$PROFILE_NAME" "$C_INFO"
+    print_status_line "IPv4 DNS" "$DNS1 / $DNS2" "$C_VALUE"
+    print_status_line "IPv6 DNS" "不写入（避免在无 IPv6 连接时产生解析超时）" "$C_DIM"
+}
+
 apply_with_resolved_prompt() {
     local choice
 
     while true; do
+        clear_screen
+        print_header
+        print_section_title "应用 DNS 配置"
+        print_selected_profile
         echo
         print_section_title "systemd-resolved 处理方式"
         print_menu_item "1" "保留软件包，仅停用服务后写入"
@@ -1213,10 +1294,10 @@ apply_with_resolved_prompt() {
                 return 1
                 ;;
             *)
-                warn "无效选择。"
+                warn "无效选择，请输入 0-2。"
+                pause "按 Enter 重新选择..."
                 ;;
         esac
-        echo
     done
 }
 
@@ -1228,9 +1309,7 @@ apply_dns_profile() {
     clear_screen
     print_header
     print_section_title "应用 DNS 配置"
-    print_status_line "所选方案" "$PROFILE_NAME" "$C_INFO"
-    print_status_line "IPv4 DNS" "$DNS1 / $DNS2" "$C_VALUE"
-    print_status_line "IPv6 DNS" "不写入（避免在无 IPv6 连接时产生解析超时）" "$C_DIM"
+    print_selected_profile
     echo
     print_rule
     echo
@@ -1282,8 +1361,22 @@ print_recommendation() {
         return 0
     fi
 
-    local winner loser winner_score loser_score winner_avg winner_median winner_p90 winner_bad winner_zero
-    local loser_avg loser_median loser_p90 loser_bad loser_zero
+    if [[ "$cf_bad" == "$google_bad" \
+        && "$cf_median" == "$google_median" \
+        && "$cf_p90" == "$google_p90" \
+        && "$cf_avg" == "$google_avg" \
+        && "$cf_score" == "$google_score" ]]; then
+        print_detail_line "结论" "Cloudflare 与 Google 表现相当" "$C_INFO"
+        print_detail_line "共同指标" "失败 $cf_bad/$total_rounds · Median $cf_median ms · P90 $cf_p90 ms · Average $cf_avg ms"
+        if (( cf_zero > 0 || google_zero > 0 )); then
+            print_detail_line "样本处理" "0 ms 样本已忽略（Cloudflare $cf_zero · Google $google_zero）"
+        fi
+        print_detail_line "测试方法" "按域名轮询，每个域名测试 $ITERATIONS 轮"
+        return 0
+    fi
+
+    local winner loser winner_score loser_score winner_avg winner_median winner_p90 winner_bad
+    local loser_avg loser_median loser_p90 loser_bad
 
     if dns_a_is_better "$cf_bad" "$total_rounds" "$cf_median" "$cf_p90" "$cf_avg" "$cf_score" \
                         "$google_bad" "$total_rounds" "$google_median" "$google_p90" "$google_avg" "$google_score"; then
@@ -1295,12 +1388,10 @@ print_recommendation() {
         winner_median="$cf_median"
         winner_p90="$cf_p90"
         winner_bad="$cf_bad"
-        winner_zero="$cf_zero"
         loser_avg="$google_avg"
         loser_median="$google_median"
         loser_p90="$google_p90"
         loser_bad="$google_bad"
-        loser_zero="$google_zero"
     else
         winner="Google"
         loser="Cloudflare"
@@ -1310,12 +1401,10 @@ print_recommendation() {
         winner_median="$google_median"
         winner_p90="$google_p90"
         winner_bad="$google_bad"
-        winner_zero="$google_zero"
         loser_avg="$cf_avg"
         loser_median="$cf_median"
         loser_p90="$cf_p90"
         loser_bad="$cf_bad"
-        loser_zero="$cf_zero"
     fi
 
     local diff level winner_ratio loser_ratio
@@ -1378,7 +1467,7 @@ test_dns() {
     done
 
     test_ui_begin
-    draw_test_dashboard "Preparing" "waiting" "$query_done" "$total_queries" 0 "pending" cf_live_status google_live_status
+    draw_test_dashboard "准备中" "等待任务" "$query_done" "$total_queries" 0 "待开始" cf_live_status google_live_status
 
     for idx in 0 1; do
         dns="${TEST_DNS[$idx]}"
@@ -1499,7 +1588,7 @@ test_dns() {
 
     test_ui_end
     if [[ -t 1 ]]; then
-        printf '\e[H\e[2J'
+        printf '\033[H\033[2J'
     fi
 
     print_report_title "域名对比" "$COMPARE_WIDTH"
@@ -1542,7 +1631,8 @@ cleanup_script_configs() {
     clear_screen
     print_header
     print_section_title "清理旧版配置"
-    warn "只清理旧版 google_vs_cf 残留：resolved drop-in、旧 DoH 服务/目录，以及可选 DNS 文件锁。"
+    print_detail_line "清理范围" "resolved drop-in、旧 DoH 服务及目录"
+    print_detail_line "可选操作" "移除 /etc/resolv.conf 文件锁"
     echo
     print_rule
     echo
@@ -1621,8 +1711,8 @@ main_menu() {
                 return 0
                 ;;
             *)
-                warn "无效选择。"
-                pause
+                warn "无效选择，请输入 0-3。"
+                pause "按 Enter 重新选择..."
                 ;;
         esac
     done
@@ -1636,7 +1726,10 @@ trap 'on_signal 131' QUIT
 
 capture_self_path
 validate_runtime_settings
-setup_input
+if ! setup_input; then
+    err "未检测到可交互终端，无法显示菜单或读取选择。"
+    exit 1
+fi
 need_root
 main_menu
 exit 0
