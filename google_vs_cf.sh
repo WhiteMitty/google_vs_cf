@@ -70,7 +70,7 @@ err()  { echo "${C_ERR}$*${C_RESET}" >&2; }
 print_menu_item() {
     local key="$1"
     local title="$2"
-    printf '%s%b%2s%b) %b%s%b\n' \
+    printf '%s%b%s%b) %b%s%b\n' \
         "$MENU_PAD" "$C_INFO" "$key" "$C_RESET" "$C_OK" "$title" "$C_RESET"
 }
 
@@ -84,7 +84,7 @@ print_profile_item() {
     pad=$((target_width - DISPLAY_WIDTH))
     (( pad < 1 )) && pad=1
 
-    printf '%s%b%2s%b) %b%s%b%*s%b%s%b\n' \
+    printf '%s%b%s%b) %b%s%b%*s%b%s%b\n' \
         "$MENU_PAD" "$C_INFO" "$key" "$C_RESET" \
         "$C_OK" "$title" "$C_RESET" "$pad" "" \
         "$C_VALUE" "$dns" "$C_RESET"
@@ -228,6 +228,8 @@ need_root() {
 }
 
 pause() {
+    local _dummy
+
     echo
     if ! read_user _dummy "${MENU_PAD}按 Enter 返回..."; then
         echo
@@ -300,6 +302,7 @@ close_input_fd() {
 stop_active_query() {
     local pid="$ACTIVE_QUERY_PID"
     local fd="$ACTIVE_QUERY_FD"
+    local _cleanup_line
     ACTIVE_QUERY_FD=""
 
     if [[ -z "$pid" ]]; then
@@ -791,6 +794,8 @@ draw_test_dashboard() {
 }
 
 choose_profile() {
+    local choice
+
     while true; do
         clear_screen
         print_header
@@ -799,7 +804,9 @@ choose_profile() {
         print_profile_item "2" "Google"     "8.8.8.8 / 8.8.4.4"
         print_profile_item "3" "Cloudflare 优先" "1.1.1.1 / 8.8.8.8"
         print_profile_item "4" "Google 优先" "8.8.8.8 / 1.1.1.1"
-        print_profile_item "0" "返回"       ""
+        print_menu_item "0" "返回"
+        echo
+        print_rule
         echo
         if ! read_user choice "${MENU_PAD}请选择 [0-4]: "; then
             echo
@@ -898,13 +905,15 @@ cleanup_resolved_dropin() {
 }
 
 prompt_cleanup_legacy() {
+    local answer
+
     if ! legacy_dns_exists; then
         return 0
     fi
 
     echo
     warn "检测到旧版 google-vs-cf DoH 服务或目录。"
-    if ! read_user answer "是否删除这些旧配置？[y/N]: "; then
+    if ! read_user answer "${MENU_PAD}是否删除这些旧配置？[y/N]: "; then
         echo
         return 0
     fi
@@ -924,6 +933,8 @@ prompt_cleanup_legacy() {
 }
 
 prompt_unlock_old_resolv_lock() {
+    local answer
+
     if ! is_locked; then
         return 0
     fi
@@ -986,6 +997,8 @@ write_resolv_file() {
 }
 
 prompt_lock_resolv() {
+    local answer
+
     echo
     if ! read_user answer "${MENU_PAD}是否锁定 /etc/resolv.conf？[y/N]: "; then
         echo
@@ -1034,6 +1047,8 @@ stop_disable_resolved() {
 }
 
 confirm_purge_resolved() {
+    local answer
+
     if ! command_exists systemctl; then
         err "未找到 systemctl，无法安全管理 systemd-resolved。"
         return 1
@@ -1096,12 +1111,16 @@ resolved_related_detected() {
 }
 
 apply_with_resolved_prompt() {
+    local choice
+
     while true; do
         echo
         print_section_title "systemd-resolved 处理方式"
         print_menu_item "1" "保留软件包，仅停用服务后写入"
         print_menu_item "2" "卸载软件包后写入"
         print_menu_item "0" "取消并返回"
+        echo
+        print_rule
         echo
         if ! read_user choice "${MENU_PAD}请选择 [0-2]: "; then
             echo
@@ -1142,6 +1161,8 @@ apply_with_resolved_prompt() {
 }
 
 apply_dns_profile() {
+    local answer
+
     need_dns_write_tools || return 1
 
     clear_screen
@@ -1150,6 +1171,8 @@ apply_dns_profile() {
     print_status_line "所选方案" "$PROFILE_NAME" "$C_INFO"
     print_status_line "IPv4 DNS" "$DNS1 / $DNS2" "$C_VALUE"
     print_status_line "IPv6 DNS" "不写入（避免在无 IPv6 连接时产生解析超时）" "$C_DIM"
+    echo
+    print_rule
     echo
     read_user answer "${MENU_PAD}继续？[y/N]: " || { echo; warn "已取消。"; return 1; }
     case "$answer" in
@@ -1454,10 +1477,15 @@ test_dns() {
 }
 
 cleanup_script_configs() {
+    local answer
+
     clear_screen
     print_header
     print_section_title "清理旧版配置"
     warn "只清理旧版 google_vs_cf 残留：resolved drop-in、旧 DoH 服务/目录，以及可选 DNS 文件锁。"
+    echo
+    print_rule
+    echo
     if ! read_user answer "${MENU_PAD}继续？[y/N]: "; then
         echo
         return 1
@@ -1492,10 +1520,11 @@ cleanup_script_configs() {
 }
 
 main_menu() {
+    local action
+
     while true; do
         clear_screen
         print_header
-        print_section_title "操作菜单"
         print_menu_item "1" "DNS 性能测试"
         echo
         print_menu_item "2" "应用 DNS 配置"
@@ -1503,6 +1532,8 @@ main_menu() {
         print_menu_item "3" "清理旧版配置"
         echo
         print_menu_item "0" "退出脚本"
+        echo
+        print_rule
         echo
         if ! read_user action "${MENU_PAD}请选择 [0-3]: "; then
             clear_screen
