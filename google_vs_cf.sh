@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -Eeuo pipefail
 
 APP_NAME="google_vs_cf"
 
@@ -14,9 +14,9 @@ DOMAINS=(
     "instagram.com"  "aws.amazon.com" "disneyplus.com"   "steampowered.com"
 )
 
-ITERATIONS=20
-DIG_TIMEOUT=2
-OUTER_TIMEOUT=$((DIG_TIMEOUT + 1))
+ITERATIONS="${ITERATIONS:-20}"
+DIG_TIMEOUT="${DIG_TIMEOUT:-2}"
+OUTER_TIMEOUT=""
 QTYPE="A"
 
 RESOLVED_DROPIN_DIR="/etc/systemd/resolved.conf.d"
@@ -27,6 +27,13 @@ LEGACY_DOH_SERVICE="/etc/systemd/system/google-vs-cf-doh.service"
 PROFILE_NAME=""
 DNS1=""
 DNS2=""
+
+# Runtime-only state. No script, PID, log, or temporary file is persisted.
+ACTIVE_QUERY_PID=""
+ACTIVE_QUERY_FD=""
+INPUT_FD=0
+INPUT_FD_OWNED=0
+RUNTIME_TEMP_FILE=""
 
 if [[ -t 1 ]]; then
     C_TITLE=$'\033[1;93m'
@@ -47,7 +54,7 @@ MENU_PAD="  "
 say()  { echo "$*"; }
 ok()   { echo "${C_OK}$*${C_RESET}"; }
 warn() { echo "${C_WARN}$*${C_RESET}"; }
-err()  { echo "${C_ERR}$*${C_RESET}"; }
+err()  { echo "${C_ERR}$*${C_RESET}" >&2; }
 info() { echo "${C_INFO}$*${C_RESET}"; }
 
 print_menu_item() {
@@ -132,7 +139,7 @@ need_root() {
 
 pause() {
     echo
-    if ! read -r -p "${MENU_PAD}按 Enter 返回..." _dummy; then
+    if ! read_user _dummy "${MENU_PAD}按 Enter 返回..."; then
         echo
     fi
 }
@@ -150,6 +157,118 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+validate_runtime_settings() {
+    if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
+        err "需要 Bash 4.3 或更高版本。"
+        return 1
+    fi
+    if [[ ! "$ITERATIONS" =~ ^[0-9]+$ || $ITERATIONS -lt 1 || $ITERATIONS -gt 100 ]]; then
+        err "ITERATIONS 必须是 1 到 100 的整数。"
+        return 1
+    fi
+    if [[ ! "$DIG_TIMEOUT" =~ ^[0-9]+$ || $DIG_TIMEOUT -lt 1 || $DIG_TIMEOUT -gt 30 ]]; then
+        err "DIG_TIMEOUT 必须是 1 到 30 的整数。"
+        return 1
+    fi
+    OUTER_TIMEOUT=$((DIG_TIMEOUT + 1))
+}
+
+setup_input() {
+    if [[ -t 0 ]]; then
+        INPUT_FD=0
+        return 0
+    fi
+
+    # Supports both:
+    #   bash <(curl -fsSL URL)
+    #   curl -fsSL URL | bash
+    # The latter shares stdin with the script body, so prompts must use /dev/tty.
+    if { exec {INPUT_FD}</dev/tty; } 2>/dev/null; then
+        INPUT_FD_OWNED=1
+    else
+        INPUT_FD=-1
+    fi
+}
+
+read_user() {
+    local variable="$1"
+    local prompt="${2:-}"
+    if (( INPUT_FD < 0 )); then
+        return 1
+    fi
+    IFS= read -r -u "$INPUT_FD" -p "$prompt" "$variable"
+}
+
+close_input_fd() {
+    if (( INPUT_FD_OWNED == 1 )); then
+        exec {INPUT_FD}<&- 2>/dev/null || true
+        INPUT_FD_OWNED=0
+        INPUT_FD=0
+    fi
+}
+
+stop_active_query() {
+    local pid="$ACTIVE_QUERY_PID"
+    local fd="$ACTIVE_QUERY_FD"
+    ACTIVE_QUERY_FD=""
+
+    if [[ -z "$pid" ]]; then
+        if [[ -n "$fd" ]]; then
+            exec {fd}<&- 2>/dev/null || true
+        fi
+        return 0
+    fi
+
+    if kill -0 "$pid" 2>/dev/null; then
+        # GNU timeout forwards TERM to dig. Give it a short built-in grace
+        # period, then force-stop timeout if it has not exited.
+        kill -TERM "$pid" 2>/dev/null || true
+        if kill -0 "$pid" 2>/dev/null && [[ -n "$fd" ]]; then
+            IFS= read -r -t 0.25 _cleanup_line <&"$fd" || true
+        fi
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    fi
+
+    if [[ -n "$fd" ]]; then
+        exec {fd}<&- 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+    ACTIVE_QUERY_PID=""
+}
+
+cleanup_runtime() {
+    stop_active_query
+    if [[ -n "$RUNTIME_TEMP_FILE" ]]; then
+        rm -f -- "$RUNTIME_TEMP_FILE" 2>/dev/null || true
+        RUNTIME_TEMP_FILE=""
+    fi
+    test_ui_end
+    close_input_fd
+}
+
+on_exit() {
+    local rc="$1"
+    trap - EXIT INT TERM HUP QUIT
+    cleanup_runtime
+    return "$rc"
+}
+
+on_signal() {
+    local rc="$1"
+    trap - EXIT INT TERM HUP QUIT
+    cleanup_runtime
+    printf '\n'
+    exit "$rc"
+}
+
+systemd_resolved_present() {
+    pkg_installed systemd-resolved && return 0
+    command_exists systemctl && systemctl cat systemd-resolved.service >/dev/null 2>&1 && return 0
+    [[ -f /usr/lib/systemd/system/systemd-resolved.service || -f /lib/systemd/system/systemd-resolved.service ]]
+}
+
 service_state() {
     local unit="$1"
     if ! command_exists systemctl; then
@@ -157,6 +276,19 @@ service_state() {
         return 0
     fi
     systemctl is-active "$unit" 2>/dev/null || true
+}
+
+service_is_stopped_or_absent() {
+    local state
+    state="$(service_state "$1")"
+    case "$state" in
+        inactive|failed|unknown|not-found)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 enabled_state() {
@@ -169,7 +301,7 @@ enabled_state() {
 }
 
 resolved_summary_raw() {
-    if pkg_installed systemd-resolved; then
+    if systemd_resolved_present; then
         echo "installed|$(enabled_state systemd-resolved)|$(service_state systemd-resolved)"
     else
         echo "not installed|n/a|n/a"
@@ -216,7 +348,7 @@ resolv_mode_raw() {
 
 
 color_resolved() {
-    if pkg_installed systemd-resolved; then
+    if systemd_resolved_present; then
         printf "%s已安装%s" "$C_OK" "$C_RESET"
     else
         printf "%s未安装%s" "$C_DIM" "$C_RESET"
@@ -247,21 +379,20 @@ print_header() {
     echo
 }
 
-pkg_install() {
-    local -a pkgs=("$@")
-    if ! command_exists apt-get; then
-        err "未找到 apt-get，当前脚本主要面向 Debian / Ubuntu。"
-        return 1
-    fi
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    apt-get install -y "${pkgs[@]}"
-}
-
 prompt_install_missing() {
-    local -a missing=("$@")
-    mapfile -t missing < <(printf '%s
-' "${missing[@]}" | awk 'NF && !seen[$0]++')
+    local -a input=("$@")
+    local -a missing=()
+    local -A seen=()
+    local item
+
+    for item in "${input[@]}"; do
+        [[ -n "$item" ]] || continue
+        if [[ -z "${seen["$item"]+present}" ]]; then
+            seen["$item"]=1
+            missing+=("$item")
+        fi
+    done
+
     if [[ ${#missing[@]} -eq 0 ]]; then
         return 0
     fi
@@ -278,6 +409,16 @@ need_test_tools() {
     command_exists timeout || missing+=(timeout)
     command_exists awk || missing+=(awk)
     command_exists sort || missing+=(sort)
+
+    prompt_install_missing "${missing[@]}"
+}
+
+need_dns_write_tools() {
+    local -a missing=()
+
+    command_exists mktemp || missing+=(mktemp)
+    command_exists mv || missing+=(mv)
+    command_exists chmod || missing+=(chmod)
 
     prompt_install_missing "${missing[@]}"
 }
@@ -450,8 +591,75 @@ test_ui_begin() {
 
 test_ui_end() {
     if [[ -t 1 ]]; then
-        printf '\033[?25h'
+        printf '\033[0m\033[?25h'
     fi
+}
+
+run_dns_query() {
+    local dns="$1"
+    local domain="$2"
+    local line="" pid fd raw_out_fd start_fd
+
+    QUERY_OUTPUT=""
+    QUERY_RC=1
+
+    # The coprocess shell immediately execs timeout, so it does not remain as
+    # a child Bash. ACTIVE_QUERY_PID is always waited for or killed by traps.
+    if ! coproc DNS_QUERY {
+        # Keep the coprocess alive until the parent has duplicated the output
+        # descriptor. Without this handshake, an extremely fast child can
+        # exit before Bash finishes exposing the second output line.
+        if ! IFS= read -r _query_start || [[ "$_query_start" != "GO" ]]; then
+            exit 125
+        fi
+        exec timeout --foreground -k 1s "${OUTER_TIMEOUT}s" \
+            dig @"$dns" "$domain" "$QTYPE" \
+            +tries=1 +time="$DIG_TIMEOUT" \
+            +noquestion +noanswer +noauthority +noadditional \
+            +comments +stats 2>/dev/null
+    }; then
+        QUERY_RC=125
+        return 0
+    fi
+
+    pid="$!"
+    ACTIVE_QUERY_PID="$pid"
+    raw_out_fd="${DNS_QUERY[0]}"
+    start_fd="${DNS_QUERY[1]}"
+    if ! exec {fd}<&"$raw_out_fd"; then
+        exec {raw_out_fd}<&- 2>/dev/null || true
+        exec {start_fd}>&- 2>/dev/null || true
+        stop_active_query
+        unset DNS_QUERY DNS_QUERY_PID 2>/dev/null || true
+        QUERY_RC=125
+        return 0
+    fi
+    exec {raw_out_fd}<&- 2>/dev/null || true
+    ACTIVE_QUERY_FD="$fd"
+    if ! printf 'GO\n' >&"$start_fd"; then
+        exec {start_fd}>&- 2>/dev/null || true
+        stop_active_query
+        unset DNS_QUERY DNS_QUERY_PID 2>/dev/null || true
+        QUERY_RC=125
+        return 0
+    fi
+    exec {start_fd}>&- 2>/dev/null || true
+
+    while IFS= read -r line <&"$fd"; do
+        QUERY_OUTPUT+="$line"$'\n'
+    done
+
+    ACTIVE_QUERY_FD=""
+    exec {fd}<&- 2>/dev/null || true
+
+    if wait "$pid"; then
+        QUERY_RC=0
+    else
+        QUERY_RC=$?
+    fi
+    ACTIVE_QUERY_PID=""
+    unset DNS_QUERY DNS_QUERY_PID 2>/dev/null || true
+    return 0
 }
 
 draw_test_dashboard() {
@@ -498,7 +706,7 @@ choose_profile() {
         print_profile_item "4" "Google 优先" "8.8.8.8 / 1.1.1.1"
         print_profile_item "0" "返回"       ""
         echo
-        if ! read -r -p "${MENU_PAD}请选择 [0-4]: " choice; then
+        if ! read_user choice "${MENU_PAD}请选择 [0-4]: "; then
             echo
             return 1
         fi
@@ -539,22 +747,59 @@ choose_profile() {
 }
 
 legacy_dns_exists() {
-    [[ -f "$LEGACY_DOH_SERVICE" || -d "$LEGACY_DOH_DIR" ]]
+    [[ -f "$LEGACY_DOH_SERVICE" || -d "$LEGACY_DOH_DIR" ]] && return 0
+    command_exists systemctl \
+        && systemctl cat google-vs-cf-doh.service >/dev/null 2>&1
 }
 
 cleanup_legacy_doh() {
+    local unit_known=0
+
     if [[ -f "$LEGACY_DOH_SERVICE" ]]; then
-        systemctl stop google-vs-cf-doh.service 2>/dev/null || true
-        systemctl disable google-vs-cf-doh.service 2>/dev/null || true
-        rm -f "$LEGACY_DOH_SERVICE"
+        unit_known=1
+    elif command_exists systemctl \
+        && systemctl cat google-vs-cf-doh.service >/dev/null 2>&1; then
+        unit_known=1
     fi
-    rm -rf "$LEGACY_DOH_DIR"
-    systemctl daemon-reload 2>/dev/null || true
+
+    if (( unit_known == 1 )); then
+        if ! command_exists systemctl; then
+            err "检测到旧 DoH 服务，但缺少 systemctl，无法确认其进程已停止。"
+            return 1
+        fi
+        systemctl stop google-vs-cf-doh.service 2>/dev/null || true
+        if ! service_is_stopped_or_absent google-vs-cf-doh.service; then
+            err "旧 DoH 服务未确认停止，未删除其文件。当前状态：$(service_state google-vs-cf-doh.service)"
+            return 1
+        fi
+        systemctl disable google-vs-cf-doh.service 2>/dev/null || true
+    fi
+
+    if ! rm -f "$LEGACY_DOH_SERVICE"; then
+        err "删除旧 DoH 服务文件失败。"
+        return 1
+    fi
+    if ! rm -rf "$LEGACY_DOH_DIR"; then
+        err "删除旧 DoH 目录失败。"
+        return 1
+    fi
+
+    if command_exists systemctl; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl reset-failed google-vs-cf-doh.service 2>/dev/null || true
+    fi
 }
 
 cleanup_resolved_dropin() {
-    rm -f "$RESOLVED_DROPIN_FILE"
-    systemctl daemon-reload 2>/dev/null || true
+    local reload_active="${1:-no}"
+    if ! rm -f "$RESOLVED_DROPIN_FILE"; then
+        err "删除 resolved drop-in 失败：$RESOLVED_DROPIN_FILE"
+        return 1
+    fi
+    if [[ "$reload_active" == "yes" ]] && command_exists systemctl \
+        && [[ "$(service_state systemd-resolved)" == "active" ]]; then
+        systemctl restart systemd-resolved
+    fi
 }
 
 prompt_cleanup_legacy() {
@@ -564,14 +809,18 @@ prompt_cleanup_legacy() {
 
     echo
     warn "检测到旧版 google-vs-cf DoH 服务或目录。"
-    if ! read -r -p "是否删除这些旧配置？[y/N]: " answer; then
+    if ! read_user answer "是否删除这些旧配置？[y/N]: "; then
         echo
         return 0
     fi
     case "$answer" in
         y|Y)
-            cleanup_legacy_doh
-            ok "旧版 DoH 配置已清理。"
+            if cleanup_legacy_doh; then
+                ok "旧版 DoH 配置已清理。"
+            else
+                err "旧版 DoH 配置未能完全清理。"
+                return 1
+            fi
             ;;
         *)
             warn "已保留旧版 DoH 配置。"
@@ -586,7 +835,7 @@ prompt_unlock_old_resolv_lock() {
 
     echo
     warn "检测到 /etc/resolv.conf 已被 chattr +i 锁定。"
-    if ! read -r -p "${MENU_PAD}是否先移除旧锁？[y/N]: " answer; then
+    if ! read_user answer "${MENU_PAD}是否先移除旧锁？[y/N]: "; then
         echo
         return 1
     fi
@@ -608,18 +857,42 @@ prompt_unlock_old_resolv_lock() {
 }
 
 write_resolv_file() {
-    rm -f /etc/resolv.conf
-    {
-        echo "nameserver $DNS1"
-        echo "nameserver $DNS2"
-        echo "options timeout:2 attempts:2"
-    } > /etc/resolv.conf
-    chmod 0644 /etc/resolv.conf 2>/dev/null || true
+    local tmp_file
+
+    if ! tmp_file="$(mktemp /etc/.google_vs_cf.resolv.conf.XXXXXX)"; then
+        err "无法在 /etc 中创建临时 DNS 文件。"
+        return 1
+    fi
+    RUNTIME_TEMP_FILE="$tmp_file"
+
+    if ! {
+        printf 'nameserver %s\n' "$DNS1"
+        printf 'nameserver %s\n' "$DNS2"
+        printf 'options timeout:2 attempts:2\n'
+    } > "$tmp_file"; then
+        err "写入临时 DNS 文件失败。"
+        rm -f -- "$tmp_file" 2>/dev/null || true
+        RUNTIME_TEMP_FILE=""
+        return 1
+    fi
+    if ! chmod 0644 "$tmp_file"; then
+        err "设置临时 DNS 文件权限失败。"
+        rm -f -- "$tmp_file" 2>/dev/null || true
+        RUNTIME_TEMP_FILE=""
+        return 1
+    fi
+    if ! mv -fT -- "$tmp_file" /etc/resolv.conf; then
+        err "原子替换 /etc/resolv.conf 失败；原文件保持不变。"
+        rm -f -- "$tmp_file" 2>/dev/null || true
+        RUNTIME_TEMP_FILE=""
+        return 1
+    fi
+    RUNTIME_TEMP_FILE=""
 }
 
 prompt_lock_resolv() {
     echo
-    if ! read -r -p "${MENU_PAD}是否锁定 /etc/resolv.conf？[y/N]: " answer; then
+    if ! read_user answer "${MENU_PAD}是否锁定 /etc/resolv.conf？[y/N]: "; then
         echo
         return 0
     fi
@@ -644,25 +917,40 @@ prompt_lock_resolv() {
 
 write_direct_resolv() {
     prompt_unlock_old_resolv_lock || return 1
-    cleanup_resolved_dropin
-    write_resolv_file
+    cleanup_resolved_dropin || return 1
+    write_resolv_file || return 1
     prompt_lock_resolv
 }
 
 stop_disable_resolved() {
+    if ! command_exists systemctl; then
+        err "未找到 systemctl，无法安全停用 systemd-resolved。"
+        return 1
+    fi
     systemctl stop systemd-resolved 2>/dev/null || true
-    systemctl disable systemd-resolved 2>/dev/null || true
-    cleanup_resolved_dropin
+    if ! service_is_stopped_or_absent systemd-resolved; then
+        err "systemd-resolved 未确认停止，DNS 未写入。当前状态：$(service_state systemd-resolved)"
+        return 1
+    fi
+    if ! systemctl disable systemd-resolved 2>/dev/null; then
+        warn "systemd-resolved 无法禁用或属于静态单元，请留意重启后的状态。"
+    fi
+    cleanup_resolved_dropin || return 1
 }
 
-purge_resolved() {
-    if ! pkg_installed systemd-resolved; then
-        return 0
+confirm_purge_resolved() {
+    if ! command_exists systemctl; then
+        err "未找到 systemctl，无法安全管理 systemd-resolved。"
+        return 1
+    fi
+    if pkg_installed systemd-resolved && ! command_exists apt-get; then
+        err "未找到 apt-get，无法自动卸载 systemd-resolved。"
+        return 1
     fi
 
     echo
     warn "卸载 systemd-resolved 可能影响 NetworkManager、netplan 或系统默认 DNS 行为。"
-    if ! read -r -p "${MENU_PAD}确认卸载请输入 yes: " answer; then
+    if ! read_user answer "${MENU_PAD}确认卸载请输入 yes: "; then
         echo
         return 1
     fi
@@ -671,19 +959,33 @@ purge_resolved() {
         warn "已取消卸载。"
         return 1
     fi
+}
 
-    systemctl stop systemd-resolved 2>/dev/null || true
-    systemctl disable systemd-resolved 2>/dev/null || true
-    cleanup_resolved_dropin
-
-    if command_exists apt-get; then
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get purge -y systemd-resolved
-        apt-get autoremove -y
-        ok "systemd-resolved 已卸载。"
-    else
+purge_resolved() {
+    if pkg_installed systemd-resolved && ! command_exists apt-get; then
         err "未找到 apt-get，无法自动卸载 systemd-resolved。"
         return 1
+    fi
+
+    systemctl stop systemd-resolved 2>/dev/null || true
+    if ! service_is_stopped_or_absent systemd-resolved; then
+        err "systemd-resolved 未确认停止，已取消卸载。当前状态：$(service_state systemd-resolved)"
+        return 1
+    fi
+    if ! systemctl disable systemd-resolved 2>/dev/null; then
+        warn "systemd-resolved 无法禁用或属于静态单元；继续执行卸载。"
+    fi
+    cleanup_resolved_dropin || return 1
+
+    if pkg_installed systemd-resolved; then
+        export DEBIAN_FRONTEND=noninteractive
+        if ! apt-get purge -y systemd-resolved; then
+            err "systemd-resolved 卸载失败，请检查 apt/dpkg 状态。"
+            return 1
+        fi
+        ok "systemd-resolved 已卸载。"
+    else
+        warn "未检测到独立的 systemd-resolved 软件包；已停用现有服务。"
     fi
 }
 
@@ -706,22 +1008,29 @@ apply_with_resolved_prompt() {
         print_menu_item "2" "卸载后写入"
         print_menu_item "0" "取消"
         echo
-        if ! read -r -p "${MENU_PAD}请选择 [0-2]: " choice; then
+        if ! read_user choice "${MENU_PAD}请选择 [0-2]: "; then
             echo
             return 1
         fi
         echo
         case "$choice" in
             1)
-                stop_disable_resolved
-                write_direct_resolv
+                if ! command_exists systemctl; then
+                    err "未找到 systemctl，无法安全停用 systemd-resolved。"
+                    return 1
+                fi
+                prompt_unlock_old_resolv_lock || return 1
+                stop_disable_resolved || return 1
+                write_resolv_file || return 1
+                prompt_lock_resolv
                 return $?
                 ;;
             2)
+                confirm_purge_resolved || return 1
                 prompt_unlock_old_resolv_lock || return 1
-                write_resolv_file
+                write_resolv_file || return 1
                 purge_resolved || return 1
-                write_resolv_file
+                write_resolv_file || return 1
                 prompt_lock_resolv
                 return $?
                 ;;
@@ -738,6 +1047,8 @@ apply_with_resolved_prompt() {
 }
 
 apply_dns_profile() {
+    need_dns_write_tools || return 1
+
     echo "应用 DNS"
     echo "$SUBLINE"
     echo
@@ -746,13 +1057,13 @@ apply_dns_profile() {
     printf "%sDNS  : %s / %s
 " "$MENU_PAD" "$DNS1" "$DNS2"
     echo
-    read -r -p "${MENU_PAD}继续？[y/N]: " answer || { echo; warn "已取消。"; return 1; }
+    read_user answer "${MENU_PAD}继续？[y/N]: " || { echo; warn "已取消。"; return 1; }
     case "$answer" in
         y|Y) ;;
         *) warn "已取消。"; return 1 ;;
     esac
 
-    prompt_cleanup_legacy
+    prompt_cleanup_legacy || return 1
 
     if resolved_related_detected; then
         apply_with_resolved_prompt
@@ -915,14 +1226,9 @@ test_dns() {
                 rc=0
                 live_value="bad"
 
-                if output=$(timeout "${OUTER_TIMEOUT}s" dig @"$dns" "$domain" "$QTYPE" \
-                    +tries=1 +time="$DIG_TIMEOUT" \
-                    +noquestion +noanswer +noauthority +noadditional +nostats \
-                    +comments +stats 2>/dev/null); then
-                    rc=0
-                else
-                    rc=$?
-                fi
+                run_dns_query "$dns" "$domain"
+                output="$QUERY_OUTPUT"
+                rc="$QUERY_RC"
 
                 case "$rc" in
                     0)
@@ -960,7 +1266,6 @@ test_dns() {
                 query_done=$((query_done + 1))
                 current_status="$live_value"
                 draw_test_dashboard "$label" "$domain" "$query_done" "$total_queries" "$round" "$current_status" cf_live_status google_live_status
-                sleep 0.03
             done
         done
 
@@ -1063,7 +1368,7 @@ cleanup_script_configs() {
     echo "$SUBLINE"
     echo
     warn "只清理旧版 google_vs_cf 残留：resolved drop-in、旧 DoH 服务/目录，以及可选 DNS 文件锁。"
-    if ! read -r -p "${MENU_PAD}继续？[y/N]: " answer; then
+    if ! read_user answer "${MENU_PAD}继续？[y/N]: "; then
         echo
         return 1
     fi
@@ -1072,15 +1377,21 @@ cleanup_script_configs() {
         *) warn "已取消。"; return 1 ;;
     esac
 
-    cleanup_resolved_dropin
-    cleanup_legacy_doh
+    if ! cleanup_resolved_dropin yes; then
+        err "resolved drop-in 已删除，但重启 systemd-resolved 失败。"
+        return 1
+    fi
+    cleanup_legacy_doh || return 1
 
     if is_locked; then
-        if read -r -p "${MENU_PAD}检测到 DNS 文件锁，是否移除？[y/N]: " answer; then
+        if read_user answer "${MENU_PAD}检测到 DNS 文件锁，是否移除？[y/N]: "; then
             case "$answer" in
                 y|Y)
-                    if command_exists chattr; then
-                        chattr -i /etc/resolv.conf 2>/dev/null || true
+                    need_unlock_tool_if_locked || return 1
+                    chattr -i /etc/resolv.conf 2>/dev/null || true
+                    if is_locked; then
+                        err "DNS 文件锁移除失败。"
+                        return 1
                     fi
                     ;;
             esac
@@ -1102,7 +1413,7 @@ main_menu() {
         echo
         print_menu_item "0" "退出"
         echo
-        if ! read -r -p "${MENU_PAD}请选择 [0-3]: " action; then
+        if ! read_user action "${MENU_PAD}请选择 [0-3]: "; then
             clear_screen
             return 0
         fi
@@ -1135,10 +1446,14 @@ main_menu() {
     done
 }
 
-trap 'test_ui_end' EXIT
-trap 'test_ui_end; exit 130' INT
-trap 'test_ui_end; exit 143' TERM
+trap 'on_exit $?' EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+trap 'on_signal 129' HUP
+trap 'on_signal 131' QUIT
 
+validate_runtime_settings
+setup_input
 need_root
 main_menu
 exit 0
