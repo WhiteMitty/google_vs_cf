@@ -35,12 +35,13 @@ PROFILE_NAME=""
 DNS1=""
 DNS2=""
 
-# Runtime-only state. No script, PID, log, or temporary file is persisted.
+# Runtime-only state. No fetched script, PID, log, or temporary file is retained.
 ACTIVE_QUERY_PID=""
 ACTIVE_QUERY_FD=""
 INPUT_FD=0
 INPUT_FD_OWNED=0
 RUNTIME_TEMP_FILE=""
+SELF_PATH=""
 
 if [[ -t 1 ]]; then
     C_TITLE=$'\033[1;93m'
@@ -265,6 +266,25 @@ validate_runtime_settings() {
     OUTER_TIMEOUT=$((DIG_TIMEOUT + 1))
 }
 
+capture_self_path() {
+    local source="${BASH_SOURCE[0]:-}"
+    local dir base absolute_dir
+
+    case "$source" in
+        ""|-|bash|sh|/dev/fd/*|/proc/*/fd/*)
+            return 0
+            ;;
+    esac
+    [[ -f "$source" || -L "$source" ]] || return 0
+
+    dir="${source%/*}"
+    base="${source##*/}"
+    [[ "$dir" == "$source" ]] && dir="."
+    if absolute_dir="$(cd -P -- "$dir" 2>/dev/null && pwd)"; then
+        SELF_PATH="$absolute_dir/$base"
+    fi
+}
+
 setup_input() {
     if [[ -t 0 ]]; then
         INPUT_FD=0
@@ -288,7 +308,21 @@ read_user() {
     if (( INPUT_FD < 0 )); then
         return 1
     fi
-    IFS= read -r -u "$INPUT_FD" -p "$prompt" "$variable"
+
+    # `read -p` is not reliable when input comes from a separately opened
+    # /dev/tty descriptor. Restore terminal attributes and write the prompt
+    # explicitly so it remains visible after the live test dashboard exits.
+    test_ui_end
+    if [[ -n "$prompt" ]]; then
+        if printf '%s' "$prompt" 2>/dev/null > /dev/tty; then
+            :
+        elif [[ -t 1 ]]; then
+            printf '%s' "$prompt"
+        else
+            printf '%s' "$prompt" >&2
+        fi
+    fi
+    IFS= read -r -u "$INPUT_FD" "$variable"
 }
 
 close_input_fd() {
@@ -297,6 +331,31 @@ close_input_fd() {
         INPUT_FD_OWNED=0
         INPUT_FD=0
     fi
+}
+
+remove_runtime_script() {
+    local path
+    local -a paths=()
+
+    [[ -n "$SELF_PATH" ]] && paths+=("$SELF_PATH")
+    # Also remove a stale copy left by an older version when this release is
+    # launched with `curl | bash` instead of from the downloaded file itself.
+    if [[ ${EUID:-$(id -u)} -eq 0 && "$SELF_PATH" != "/root/google_vs_cf.sh" ]]; then
+        paths+=("/root/google_vs_cf.sh")
+    fi
+
+    SELF_PATH=""
+    for path in "${paths[@]}"; do
+        case "$path" in
+            /*) ;;
+            *) continue ;;
+        esac
+        [[ -f "$path" || -L "$path" ]] || continue
+        if ! rm -f -- "$path" 2>/dev/null; then
+            printf '%b无法删除运行脚本：%s%b\n' "$C_ERR" "$path" "$C_RESET" >&2
+        fi
+    done
+    return 0
 }
 
 stop_active_query() {
@@ -339,6 +398,7 @@ cleanup_runtime() {
     fi
     test_ui_end
     close_input_fd
+    remove_runtime_script
 }
 
 on_exit() {
@@ -1574,6 +1634,7 @@ trap 'on_signal 143' TERM
 trap 'on_signal 129' HUP
 trap 'on_signal 131' QUIT
 
+capture_self_path
 validate_runtime_settings
 setup_input
 need_root
