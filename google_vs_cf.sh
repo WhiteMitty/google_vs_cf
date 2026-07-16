@@ -34,6 +34,8 @@ LEGACY_DOH_SERVICE="/etc/systemd/system/google-vs-cf-doh.service"
 PROFILE_NAME=""
 DNS1=""
 DNS2=""
+RESOLVED_PURGE_PLAN=""
+RESOLVED_PURGE_FINGERPRINT=""
 
 # Runtime-only state. No fetched script, PID, log, or temporary file is retained.
 ACTIVE_QUERY_PID=""
@@ -1098,16 +1100,83 @@ write_direct_resolv() {
     prompt_lock_resolv
 }
 
+prepare_resolved_purge_plan() {
+    local output action package package_base found_target=0
+    local -A seen=()
+    local -a removals=() unsafe_removals=() installations=()
+
+    RESOLVED_PURGE_PLAN=""
+    RESOLVED_PURGE_FINGERPRINT=""
+
+    if ! output="$(
+        LC_ALL=C DEBIAN_FRONTEND=noninteractive \
+            apt-get -o APT::Get::AutomaticRemove=false \
+            --simulate purge systemd-resolved 2>&1
+    )"; then
+        err "APT 无法生成 systemd-resolved 卸载预演，未修改 DNS。"
+        return 1
+    fi
+
+    while read -r action package _; do
+        [[ -n "${package:-}" ]] || continue
+        case "$action" in
+            Remv)
+                if [[ -z "${seen["remove:$package"]+present}" ]]; then
+                    seen["remove:$package"]=1
+                    removals+=("$package")
+                    package_base="${package%%:*}"
+                    case "$package_base" in
+                        systemd-resolved) found_target=1 ;;
+                        libnss-resolve) ;;
+                        *) unsafe_removals+=("$package") ;;
+                    esac
+                fi
+                ;;
+            Inst)
+                if [[ -z "${seen["install:$package"]+present}" ]]; then
+                    seen["install:$package"]=1
+                    installations+=("$package")
+                fi
+                ;;
+        esac
+    done <<< "$output"
+
+    if (( found_target == 0 )); then
+        err "APT 预演没有包含 systemd-resolved，已拒绝继续。"
+        return 1
+    fi
+    if [[ ${#installations[@]} -gt 0 ]]; then
+        err "安全检查未通过：APT 还计划安装：${installations[*]}"
+        warn "请先手动处理软件包依赖，本脚本不会自动继续。"
+        return 1
+    fi
+    if [[ ${#unsafe_removals[@]} -gt 0 ]]; then
+        err "安全检查未通过：APT 还计划移除：${unsafe_removals[*]}"
+        warn "为避免影响网络或系统组件，本脚本已拒绝卸载。"
+        return 1
+    fi
+
+    RESOLVED_PURGE_PLAN="${removals[*]}"
+    RESOLVED_PURGE_FINGERPRINT="${removals[*]}"
+}
+
 confirm_purge_resolved() {
-    local answer
+    local answer package_installed=0
+
+    RESOLVED_PURGE_PLAN=""
+    RESOLVED_PURGE_FINGERPRINT=""
 
     if ! command_exists systemctl; then
         err "未找到 systemctl，无法安全管理 systemd-resolved。"
         return 1
     fi
-    if pkg_installed systemd-resolved && ! command_exists apt-get; then
-        err "未找到 apt-get，无法自动卸载 systemd-resolved。"
-        return 1
+    if pkg_installed systemd-resolved; then
+        package_installed=1
+        if ! command_exists apt-get; then
+            err "未找到 apt-get，无法自动卸载 systemd-resolved。"
+            return 1
+        fi
+        prepare_resolved_purge_plan || return 1
     fi
 
     clear_screen
@@ -1115,7 +1184,12 @@ confirm_purge_resolved() {
     print_section_title "检测到 systemd-resolved"
     print_selected_profile
     echo
-    print_detail_line "处理方式" "卸载或停用 systemd-resolved"
+    if (( package_installed == 1 )); then
+        print_detail_line "处理方式" "卸载 systemd-resolved"
+        print_detail_line "APT 计划" "$RESOLVED_PURGE_PLAN"
+    else
+        print_detail_line "处理方式" "停止并屏蔽 systemd-resolved"
+    fi
     print_detail_line "DNS 模式" "改为普通 /etc/resolv.conf（仅 IPv4）"
     echo
     warn "${MENU_PAD}注意：这可能影响 NetworkManager、netplan 或系统默认 DNS 行为。"
@@ -1134,7 +1208,7 @@ confirm_purge_resolved() {
 }
 
 purge_resolved() {
-    local package_installed=0
+    local package_installed=0 approved_fingerprint
 
     if pkg_installed systemd-resolved; then
         package_installed=1
@@ -1143,6 +1217,23 @@ purge_resolved() {
         err "未找到 apt-get，无法自动卸载 systemd-resolved。"
         return 1
     fi
+    if (( package_installed == 1 )); then
+        approved_fingerprint="$RESOLVED_PURGE_FINGERPRINT"
+        if [[ -z "$approved_fingerprint" ]]; then
+            err "缺少已经确认的 APT 卸载计划，已拒绝继续。"
+            return 1
+        fi
+        prepare_resolved_purge_plan || return 1
+        if [[ "$RESOLVED_PURGE_FINGERPRINT" != "$approved_fingerprint" ]]; then
+            err "APT 卸载计划已发生变化，已停止操作，请重新进入配置流程。"
+            return 1
+        fi
+    fi
+
+    # Only replace the resolver link after the package plan has passed its
+    # second safety check. The plain file keeps DNS working while the service
+    # is stopped and its package maintainer scripts run.
+    write_resolv_file || return 1
 
     systemctl stop systemd-resolved 2>/dev/null || true
     if ! service_is_stopped_or_absent systemd-resolved; then
@@ -1155,7 +1246,9 @@ purge_resolved() {
     cleanup_resolved_dropin || return 1
 
     if (( package_installed == 1 )); then
-        if ! DEBIAN_FRONTEND=noninteractive apt-get purge -y systemd-resolved; then
+        if ! DEBIAN_FRONTEND=noninteractive \
+            apt-get -o APT::Get::AutomaticRemove=false \
+            purge -y systemd-resolved; then
             err "systemd-resolved 卸载失败；当前已使用普通 /etc/resolv.conf，请检查 apt/dpkg 状态。"
             return 1
         fi
@@ -1197,9 +1290,8 @@ replace_resolved_with_plain_dns() {
     confirm_purge_resolved || return 1
     prompt_unlock_old_resolv_lock || return 1
 
-    # Write working DNS before apt runs, then write it again after removal in
-    # case package scripts recreate /etc/resolv.conf or its symlink.
-    write_resolv_file || return 1
+    # purge_resolved writes working DNS after its final APT safety check. Write
+    # it once more afterwards in case package scripts recreate the old link.
     purge_resolved || return 1
     write_resolv_file || return 1
     prompt_lock_resolv
