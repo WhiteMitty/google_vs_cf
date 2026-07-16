@@ -26,6 +26,8 @@ DIG_TIMEOUT="${DIG_TIMEOUT:-2}"
 OUTER_TIMEOUT=""
 QTYPE="A"
 
+# Compatibility-only paths created by older releases. This version never
+# creates a resolved drop-in; it only removes a stale one during migration.
 RESOLVED_DROPIN_DIR="/etc/systemd/resolved.conf.d"
 RESOLVED_DROPIN_FILE="$RESOLVED_DROPIN_DIR/99-google-vs-cf.conf"
 LEGACY_DOH_DIR="/etc/google-vs-cf"
@@ -261,8 +263,11 @@ clear_screen() {
 }
 
 pkg_installed() {
-    command -v dpkg-query >/dev/null 2>&1 || return 1
-    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
+    local status
+
+    command_exists dpkg-query || return 1
+    status="$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null)" || return 1
+    [[ "$status" == "install ok installed" ]]
 }
 
 command_exists() {
@@ -374,27 +379,19 @@ close_input_fd() {
 }
 
 remove_runtime_script() {
-    local path
-    local -a paths=()
-
-    [[ -n "$SELF_PATH" ]] && paths+=("$SELF_PATH")
-    # Also remove a stale copy left by an older version when this release is
-    # launched with `curl | bash` instead of from the downloaded file itself.
-    if [[ ${EUID:-$(id -u)} -eq 0 && "$SELF_PATH" != "/root/google_vs_cf.sh" ]]; then
-        paths+=("/root/google_vs_cf.sh")
-    fi
+    local path="$SELF_PATH"
 
     SELF_PATH=""
-    for path in "${paths[@]}"; do
-        case "$path" in
-            /*) ;;
-            *) continue ;;
-        esac
-        [[ -f "$path" || -L "$path" ]] || continue
-        if ! rm -f -- "$path" 2>/dev/null; then
-            printf '%b无法删除运行脚本：%s%b\n' "$C_ERR" "$path" "$C_RESET" >&2 || true
-        fi
-    done
+    # Intentional one-shot behavior: delete only the exact script captured for
+    # this run. Never guess at, or clean up, a same-named file elsewhere.
+    case "$path" in
+        /*) ;;
+        *) return 0 ;;
+    esac
+    [[ -f "$path" || -L "$path" ]] || return 0
+    if ! rm -f -- "$path" 2>/dev/null; then
+        printf '%b无法删除运行脚本：%s%b\n' "$C_ERR" "$path" "$C_RESET" >&2 || true
+    fi
     return 0
 }
 
@@ -557,17 +554,32 @@ print_header() {
     echo
 }
 
+dependency_package() {
+    case "$1" in
+        dig) printf '%s\n' "dnsutils" ;;
+        awk) printf '%s\n' "gawk" ;;
+        timeout|sort|mktemp|mv|chmod) printf '%s\n' "coreutils" ;;
+        chattr|lsattr) printf '%s\n' "e2fsprogs" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
 prompt_install_missing() {
-    local -a input=("$@")
-    local -a missing=()
-    local -A seen=()
-    local item
+    local -a input=("$@") missing=() packages=() remaining=()
+    local -A seen_commands=() seen_packages=()
+    local item package answer
 
     for item in "${input[@]}"; do
         [[ -n "$item" ]] || continue
-        if [[ -z "${seen["$item"]+present}" ]]; then
-            seen["$item"]=1
+        command_exists "$item" && continue
+        if [[ -z "${seen_commands["$item"]+present}" ]]; then
+            seen_commands["$item"]=1
             missing+=("$item")
+            package="$(dependency_package "$item")"
+            if [[ -z "${seen_packages["$package"]+present}" ]]; then
+                seen_packages["$package"]=1
+                packages+=("$package")
+            fi
         fi
     done
 
@@ -576,8 +588,43 @@ prompt_install_missing() {
     fi
     echo
     warn "缺少依赖：${missing[*]}"
-    warn "临时脚本不自动安装依赖，请手动安装后再运行。"
-    return 1
+    print_detail_line "所需软件包" "${packages[*]}"
+    echo
+    if ! read_user answer "${MENU_PAD}是否安装并继续？[y/N]: "; then
+        echo
+        warn "未安装依赖，返回菜单。"
+        return 1
+    fi
+    case "$answer" in
+        y|Y) ;;
+        *) warn "已跳过安装，返回菜单。"; return 1 ;;
+    esac
+
+    if ! command_exists apt-get; then
+        err "未找到 apt-get，无法自动安装依赖。"
+        warn "请手动安装：${packages[*]}"
+        return 1
+    fi
+
+    echo
+    print_rule
+    printf '%s正在安装：%s\n' "$MENU_PAD" "${packages[*]}"
+    if ! DEBIAN_FRONTEND=noninteractive \
+        apt-get install -y --no-install-recommends "${packages[@]}"; then
+        err "依赖安装失败；未执行当前操作。"
+        return 1
+    fi
+    hash -r
+
+    for item in "${missing[@]}"; do
+        command_exists "$item" || remaining+=("$item")
+    done
+    if [[ ${#remaining[@]} -gt 0 ]]; then
+        err "安装完成后仍缺少命令：${remaining[*]}"
+        return 1
+    fi
+
+    ok "依赖安装完成，继续当前操作。"
 }
 
 need_test_tools() {
@@ -597,14 +644,14 @@ need_dns_write_tools() {
     command_exists mktemp || missing+=(mktemp)
     command_exists mv || missing+=(mv)
     command_exists chmod || missing+=(chmod)
+    command_exists lsattr || missing+=(lsattr)
 
     prompt_install_missing "${missing[@]}"
 }
 
 need_unlock_tool_if_locked() {
     if is_locked && ! command_exists chattr; then
-        err "检测到 /etc/resolv.conf 已锁定，但系统没有 chattr，无法解锁。"
-        return 1
+        prompt_install_missing chattr || return 1
     fi
     return 0
 }
@@ -1077,8 +1124,10 @@ prompt_lock_resolv() {
     case "$answer" in
         y|Y)
             if ! command_exists chattr; then
-                warn "缺少 chattr，无法上锁；DNS 已写入但未锁定。"
-                return 0
+                if ! prompt_install_missing chattr; then
+                    warn "DNS 已写入，但未安装 chattr，因此未锁定。"
+                    return 0
+                fi
             fi
             chattr +i /etc/resolv.conf 2>/dev/null || true
             if is_locked; then
@@ -1120,7 +1169,7 @@ prepare_resolved_purge_plan() {
     while read -r action package _; do
         [[ -n "${package:-}" ]] || continue
         case "$action" in
-            Remv)
+            Remv|Purg)
                 if [[ -z "${seen["remove:$package"]+present}" ]]; then
                     seen["remove:$package"]=1
                     removals+=("$package")
